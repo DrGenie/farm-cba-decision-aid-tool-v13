@@ -1,2358 +1,2142 @@
+/* global Chart, XLSX */
 
-// Farming CBA Decision Aid - Newcastle Business School
-// Trial cost-benefit decision aid.
-// - Can load an embedded example dataset on start (if present).
-// - Uses all rows and columns; no sampling or removal.
-// - Detects key columns, including replicate_id, treatment_name, is_control,
-//   yield_t_ha, total_cost_per_ha (variable cost proxy), and
-//   cost_amendment_input_per_ha (capital cost proxy).
-// - Treats the measured control as the baseline for all comparisons.
-// - Presents a control-centric comparison table with plain-language labels.
-// - Provides leaderboard, charts, exports (TSV/CSV/XLSX), and AI summary prompt.
+const PROJECT = {
+  name: "Trial Cost-Benefit Decision Aid",
+  partnerPlaceholder: "Project partners (letter logos)"
+};
 
-(() => {
-  "use strict";
+const state = {
+  rawRows: [],
+  rows: [],
+  treatments: [],
+  controlName: null,
+  scenario: {
+    pricePerTonne: 400,
+    timeHorizon: 10,
+    discountRate: 4
+  },
+  aggregates: [],
+  cbaResults: [],
+  basicAnalysisOnly: false,
+  charts: {
+    npvChart: null,
+    bcrChart: null,
+    paybackChart: null
+  },
+  uploadPreview: null,
+  pendingFile: null,
+  templateHeaders: null
+};
 
-  // =========================
-  // 0) STATE
-  // =========================
+const CORE_COLUMNS = [
+  "trial_id",
+  "treatment_name",
+  "is_control",
+  "yield_t_ha",
+  "total_cost_per_ha"
+];
 
-  const state = {
-    rawText: "",
-    headers: [],
-    rows: [],
-    cleanedHeaders: [],
-    cleanedRows: [],
-    pendingFile: null,
-    lastPreview: null,
-    audit: {
-      fileName: "",
-      uploadedAt: null,
-      rowCount: 0,
-      treatmentCount: 0,
-      controlCandidates: [],
-      columnMapping: {},
-      version: "1.6.0"
-    },
-    templateHeaders: [],
-    columnMap: null,
-    treatments: [], // aggregated per treatment
-    controlName: null,
-    params: {
-      pricePerTonne: 500,
-      years: 10,
-      persistenceYears: 10,
-      discountRate: 5
-    },
-    results: {
-      treatments: [],
-      control: null
-    },
-    charts: {
-      netProfitDelta: null,
-      costsBenefits: null
+const OPTIONAL_COLUMNS = [
+  "variable_cost_per_ha",
+  "fixed_cost_per_ha",
+  "capital_cost_per_ha",
+  "other_benefit_per_ha"
+];
+
+const UPLOAD_ERRORS = {
+  MISSING_COLUMNS: "Missing required columns.",
+  NO_CONTROL: "No control rows found in the dataset.",
+  NO_TREATMENT: "No treatment rows found in the dataset.",
+  NO_ROWS: "The file does not contain any data rows.",
+  PARSE: "The file could not be parsed as a table.",
+  INVALID_NUMERIC: "Some numeric fields are not in a usable format."
+};
+
+const TOAST = {
+  element: null,
+  timeout: null
+};
+
+function initToast() {
+  TOAST.element = document.getElementById("toast");
+}
+
+function showToast(message, type = "info") {
+  if (!TOAST.element) return;
+
+  TOAST.element.textContent = message;
+  TOAST.element.className = "toast show";
+
+  if (type === "success") {
+    TOAST.element.classList.add("toast-success");
+  } else if (type === "warning") {
+    TOAST.element.classList.add("toast-warn");
+  } else if (type === "error") {
+    TOAST.element.classList.add("toast-error");
+  }
+
+  if (TOAST.timeout) {
+    clearTimeout(TOAST.timeout);
+  }
+
+  TOAST.timeout = setTimeout(() => {
+    TOAST.element.className = "toast";
+  }, 3500);
+}
+
+function activateTab(tabName) {
+  const tabButtons = document.querySelectorAll(".tab");
+  const tabPanels = document.querySelectorAll(".tab-panel");
+
+  tabButtons.forEach((btn) => {
+    const isActive = btn.getAttribute("data-tab") === tabName;
+    btn.classList.toggle("active", isActive);
+    btn.setAttribute("aria-selected", isActive ? "true" : "false");
+  });
+
+  tabPanels.forEach((panel) => {
+    const id = panel.id.replace("Tab", "");
+    const isActive = id === tabName;
+    panel.hidden = !isActive;
+  });
+}
+
+function setupTabs() {
+  const tabButtons = document.querySelectorAll(".tab");
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabName = btn.getAttribute("data-tab");
+      activateTab(tabName);
+    });
+  });
+}
+
+function describeScenario(scenario) {
+  return `Price ${formatNumber(scenario.pricePerTonne, 0)} $/t; time horizon ${scenario.timeHorizon} years; discount rate ${formatNumber(
+    scenario.discountRate,
+    1
+  )}%`;
+}
+
+function setAssumptionsSummary() {
+  const el = document.getElementById("assumptionsSummary");
+  if (!el) {
+    return;
+  }
+  const s = state.scenario;
+  const lines = [
+    `Grain price: $${formatNumber(s.pricePerTonne, 0)} per tonne.`,
+    `Time horizon: ${s.timeHorizon} years.`,
+    `Discount rate: ${formatNumber(s.discountRate, 1)}% per year.`,
+    state.controlName
+      ? `Control treatment: ${state.controlName}.`
+      : "Control treatment: not yet selected."
+  ];
+  el.innerHTML = `<p>${lines.join(" ")}</p>`;
+}
+
+function setScenarioStatus(message) {
+  const el = document.getElementById("scenarioStatus");
+  if (!el) return;
+  el.textContent = message;
+}
+
+function setUploadStatus(message, isError = false) {
+  const el = document.getElementById("uploadStatus");
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove("error", "success");
+  if (message) {
+    el.classList.add(isError ? "error" : "success");
+  }
+}
+
+function setUploadPreview(html) {
+  const el = document.getElementById("uploadPreview");
+  if (!el) return;
+  el.innerHTML = html || "";
+}
+
+function formatNumber(value, decimals = 1) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "";
+  const factor = Math.pow(10, decimals);
+  const rounded = Math.round(value * factor) / factor;
+  return rounded.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  });
+}
+
+function formatCurrency(value, decimals = 0) {
+  if (value === null || value === undefined || Number.isNaN(value)) return "";
+  const factor = Math.pow(10, decimals);
+  const rounded = Math.round(value * factor) / factor;
+  return `$${rounded.toLocaleString(undefined, {
+    minimumFractionDigits: decimals,
+    maximumFractionDigits: decimals
+  })}`;
+}
+
+function parseNumber(value) {
+  if (value === null || value === undefined) return null;
+  if (typeof value === "number") {
+    return Number.isFinite(value) ? value : null;
+  }
+  const trimmed = String(value).trim();
+  if (!trimmed) return null;
+  const normalised = trimmed.replace(/,/g, "");
+  const parsed = Number(normalised);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function normaliseHeader(header) {
+  if (!header) return "";
+  return header
+    .trim()
+    .toLowerCase()
+    .replace(/\s+/g, "_")
+    .replace(/[^a-z0-9_]/g, "");
+}
+
+function normaliseRow(rawRow, headerMap) {
+  const normalised = {};
+  Object.keys(headerMap).forEach((key) => {
+    const idx = headerMap[key];
+    normalised[key] = rawRow[idx];
+  });
+  return normalised;
+}
+
+function parseDelimitedText(text, delimiter) {
+  const lines = text.split(/\r?\n/).filter((line) => line.trim().length > 0);
+  if (lines.length < 2) {
+    return { header: [], rows: [] };
+  }
+
+  const headerRaw = lines[0].split(delimiter);
+  const header = headerRaw.map((h) => h.trim());
+  const rows = [];
+
+  for (let i = 1; i < lines.length; i += 1) {
+    const parts = lines[i].split(delimiter);
+    if (parts.every((p) => p.trim() === "")) {
+      continue;
     }
+    const row = {};
+    header.forEach((h, idx) => {
+      row[h] = parts[idx] !== undefined ? parts[idx].trim() : "";
+    });
+    rows.push(row);
+  }
+
+  return { header, rows };
+}
+
+function parseSpreadsheetFile(arrayBuffer) {
+  const workbook = XLSX.read(arrayBuffer, { type: "array" });
+  const sheetName = workbook.SheetNames[0];
+  const sheet = workbook.Sheets[sheetName];
+  const json = XLSX.utils.sheet_to_json(sheet, { header: 1 });
+  if (!json.length) {
+    return { header: [], rows: [] };
+  }
+  const headerRow = json[0];
+  const header = headerRow.map((h) => String(h || "").trim());
+  const rows = [];
+  for (let i = 1; i < json.length; i += 1) {
+    const rowArr = json[i];
+    if (!rowArr || rowArr.every((c) => c === null || c === undefined || String(c).trim() === "")) {
+      continue;
+    }
+    const row = {};
+    header.forEach((h, idx) => {
+      row[h] = rowArr[idx] !== undefined && rowArr[idx] !== null ? String(rowArr[idx]).trim() : "";
+    });
+    rows.push(row);
+  }
+  return { header, rows };
+}
+
+function buildHeaderMap(header) {
+  const headerMap = {};
+  header.forEach((h, idx) => {
+    const key = normaliseHeader(h);
+    if (key) {
+      if (headerMap[key] === undefined) {
+        headerMap[key] = idx;
+      }
+    }
+  });
+  return headerMap;
+}
+
+function detectDelimiterFromName(fileName) {
+  if (!fileName) return "\t";
+  const lower = fileName.toLowerCase();
+  if (lower.endsWith(".csv")) return ",";
+  return "\t";
+}
+
+function classifyRows(header, rows) {
+  const headerMap = buildHeaderMap(header);
+  const normalisedRows = [];
+  const missingCore = [];
+
+  CORE_COLUMNS.forEach((col) => {
+    const found = Object.keys(headerMap).includes(col);
+    if (!found) {
+      missingCore.push(col);
+    }
+  });
+
+  rows.forEach((row) => {
+    const norm = {};
+    Object.keys(headerMap).forEach((key) => {
+      norm[key] = row[header[headerMap[key]]];
+    });
+    normalisedRows.push(norm);
+  });
+
+  return {
+    headerMap,
+    normalisedRows,
+    missingCore
+  };
+}
+
+function validateParsedData(header, rows) {
+  const preview = {
+    ok: false,
+    canRun: false,
+    errors: [],
+    warnings: [],
+    info: [],
+    detectedTreatments: [],
+    detectedControlName: null
   };
 
-  const VERSION = "1.6.0";
+  if (!rows.length) {
+    preview.errors.push(UPLOAD_ERRORS.NO_ROWS);
+    return preview;
+  }
 
-  const PROJECT = {
-    name: "Trial Cost-Benefit Decision Aid",
-    partnerPlaceholder: "Project partner logos (placeholder)"
-  };
+  const headerMap = buildHeaderMap(header);
+  const missing = [];
 
-  // =========================
-  // 1) UTILITIES
-  // =========================
+  CORE_COLUMNS.forEach((col) => {
+    if (!Object.prototype.hasOwnProperty.call(headerMap, col)) {
+      missing.push(col);
+    }
+  });
 
-  function showToast(message, type = "info", timeoutMs = 3200) {
-    const container = document.getElementById("toastContainer");
-    if (!container) return;
-    const toast = document.createElement("div");
-    toast.className = `toast ${type}`;
-    toast.innerHTML = `
-      <div>${message}</div>
-      <button class="toast-dismiss" aria-label="Dismiss">&times;</button>
-    `;
-    container.appendChild(toast);
+  if (missing.length) {
+    preview.errors.push(
+      `Missing required column(s): ${missing.join(
+        ", "
+      )}. Please download the template and ensure these columns are present.`
+    );
+  }
 
-    const remove = () => {
-      if (!toast.parentElement) return;
-      toast.style.opacity = "0";
-      toast.style.transform = "translateY(4px)";
-      setTimeout(() => {
-        if (toast.parentElement) {
-          toast.parentElement.removeChild(toast);
+  if (Object.prototype.hasOwnProperty.call(headerMap, "is_control")) {
+    const idx = headerMap.is_control;
+    const controlRows = rows.filter((row) => {
+      const raw = row[header[idx]];
+      if (raw === null || raw === undefined) return false;
+      const text = String(raw).trim().toLowerCase();
+      return text === "1" || text === "true" || text === "yes" || text === "control";
+    });
+
+    const nonControlRows = rows.filter((row) => {
+      const raw = row[header[idx]];
+      const text = raw === null || raw === undefined ? "" : String(raw).trim().toLowerCase();
+      return !(text === "1" || text === "true" || text === "yes" || text === "control");
+    });
+
+    if (!controlRows.length) {
+      preview.errors.push(
+        "No control identified. At least one row must be flagged as control in the is_control column."
+      );
+    }
+
+    if (!nonControlRows.length) {
+      preview.errors.push(
+        "No treatment rows detected. At least one non-control row is required for comparison."
+      );
+    }
+
+    const treatmentNames = new Set();
+    const controlNames = new Set();
+    const treatmentIndex = headerMap.treatment_name;
+
+    if (treatmentIndex !== undefined) {
+      controlRows.forEach((row) => {
+        const raw = row[header[treatmentIndex]];
+        const name = raw === null || raw === undefined ? "" : String(raw).trim();
+        if (name) {
+          controlNames.add(name);
         }
-      }, 150);
+      });
+
+      nonControlRows.forEach((row) => {
+        const raw = row[header[treatmentIndex]];
+        const name = raw === null || raw === undefined ? "" : String(raw).trim();
+        if (name) {
+          treatmentNames.add(name);
+        }
+      });
+    }
+
+    preview.detectedTreatments = Array.from(treatmentNames).sort();
+    if (controlNames.size === 1) {
+      preview.detectedControlName = Array.from(controlNames)[0];
+    } else if (controlNames.size > 1) {
+      preview.warnings.push(
+        "Multiple control treatment names were found. Please check the treatment_name column for control rows."
+      );
+    }
+  } else {
+    preview.errors.push(
+      "The is_control column is missing. Please download the template and ensure there is a column that identifies control rows."
+    );
+  }
+
+  const numericProblems = [];
+  const headerMap2 = buildHeaderMap(header);
+
+  ["yield_t_ha", "total_cost_per_ha"].forEach((col) => {
+    const idx = headerMap2[col];
+    if (idx === undefined) return;
+    let numericCount = 0;
+    rows.forEach((row) => {
+      const value = row[header[idx]];
+      const parsed = parseNumber(value);
+      if (parsed !== null) {
+        numericCount += 1;
+      }
+    });
+    if (!numericCount) {
+      numericProblems.push(col);
+    }
+  });
+
+  if (numericProblems.length) {
+    preview.errors.push(
+      `Core fields ${numericProblems.join(
+        ", "
+      )} do not contain usable numeric values. Please check formatting (no text in numeric cells).`
+    );
+  }
+
+  if (!preview.errors.length) {
+    preview.ok = true;
+    preview.canRun = true;
+  }
+
+  return preview;
+}
+
+function renderDataPreview(preview) {
+  const parts = [];
+
+  if (preview.errors.length) {
+    parts.push("<div class=\"upload-preview-errors\"><strong>Problems detected:</strong><ul>");
+    preview.errors.forEach((err) => {
+      parts.push(`<li>${err}</li>`);
+    });
+    parts.push("</ul></div>");
+  }
+
+  if (preview.warnings.length) {
+    parts.push("<div class=\"upload-preview-warnings\"><strong>Warnings:</strong><ul>");
+    preview.warnings.forEach((w) => {
+      parts.push(`<li>${w}</li>`);
+    });
+    parts.push("</ul></div>");
+  }
+
+  if (preview.info.length) {
+    parts.push("<div class=\"upload-preview-info\"><ul>");
+    preview.info.forEach((i) => {
+      parts.push(`<li>${i}</li>`);
+    });
+    parts.push("</ul></div>");
+  }
+
+  if (preview.detectedTreatments && preview.detectedTreatments.length) {
+    parts.push(
+      `<div class="upload-preview-info"><strong>Detected treatments:</strong> ${preview.detectedTreatments.join(
+        ", "
+      )}</div>`
+    );
+  }
+
+  if (preview.detectedControlName) {
+    parts.push(
+      `<div class="upload-preview-info"><strong>Detected control:</strong> ${preview.detectedControlName}</div>`
+    );
+  }
+
+  if (!preview.errors.length && !preview.warnings.length && !preview.info.length) {
+    parts.push(
+      "<div class=\"upload-preview-info\">No structural problems detected in the file. You can upload it for analysis.</div>"
+    );
+  }
+
+  setUploadPreview(parts.join(""));
+}
+
+function buildTemplateColumnsPanel(headers) {
+  const panel = document.getElementById("templateColumnsPanel");
+  if (!panel) return;
+
+  const makeRole = (name) => {
+    if (CORE_COLUMNS.includes(name)) {
+      if (name === "trial_id") return "Identifier for the trial, site, or block.";
+      if (name === "treatment_name") return "Name of the treatment or management option.";
+      if (name === "is_control") return "Flag for control rows (1, true, yes, or control).";
+      if (name === "yield_t_ha") return "Main outcome per hectare (for example yield in tonnes per hectare).";
+      if (name === "total_cost_per_ha") return "Total cost per hectare, including all variable and fixed costs.";
+    }
+    if (OPTIONAL_COLUMNS.includes(name)) {
+      if (name === "variable_cost_per_ha") return "Variable cost per hectare (for example fertiliser, chemicals, seed).";
+      if (name === "fixed_cost_per_ha") return "Fixed cost per hectare (for example machinery and overheads attributed to the treatment).";
+      if (name === "capital_cost_per_ha") return "Capital cost per hectare spread over the time horizon.";
+      if (name === "other_benefit_per_ha") return "Other benefit per hectare not captured in yield (for example quality premiums).";
+    }
+    return "Optional column that can be used for additional information.";
+  };
+
+  const allNames = [...CORE_COLUMNS, ...OPTIONAL_COLUMNS].filter((name, idx, arr) => arr.indexOf(name) === idx);
+  panel.innerHTML = "";
+
+  allNames.forEach((name) => {
+    const div = document.createElement("div");
+    div.className = "template-column";
+    const labelSpan = document.createElement("span");
+    labelSpan.className = "template-column-name tip";
+    labelSpan.textContent = name;
+    labelSpan.setAttribute(
+      "data-tooltip",
+      makeRole(name)
+    );
+
+    const roleDiv = document.createElement("div");
+    roleDiv.className = "template-column-role";
+    roleDiv.textContent = makeRole(name);
+
+    div.appendChild(labelSpan);
+    div.appendChild(roleDiv);
+    panel.appendChild(div);
+  });
+}
+
+function coerceRow(row, headerMap) {
+  const out = {};
+  Object.keys(headerMap).forEach((normKey) => {
+    const idx = headerMap[normKey];
+    out[normKey] = row[idx];
+  });
+  return out;
+}
+
+function normaliseRows(header, rows) {
+  const headerMap = buildHeaderMap(header);
+  const normRows = rows.map((row) => {
+    const normalised = {};
+    Object.keys(headerMap).forEach((key) => {
+      normalised[key] = row[header[headerMap[key]]];
+    });
+    return normalised;
+  });
+  return { headerMap, normRows };
+}
+
+function interpretControlFlag(value) {
+  if (value === null || value === undefined) return false;
+  const text = String(value).trim().toLowerCase();
+  return text === "1" || text === "true" || text === "yes" || text === "control";
+}
+
+function prepareRowsForAnalysis(header, rows) {
+  const { headerMap, normRows } = normaliseRows(header, rows);
+  const prepared = [];
+  normRows.forEach((row) => {
+    const treatmentName =
+      headerMap.treatment_name !== undefined ? String(row[Object.keys(header)[headerMap.treatment_name]]).trim() : "";
+    const isControl =
+      headerMap.is_control !== undefined
+        ? interpretControlFlag(row[Object.keys(header)[headerMap.is_control]])
+        : false;
+
+    const yieldValue =
+      headerMap.yield_t_ha !== undefined
+        ? parseNumber(row[Object.keys(header)[headerMap.yield_t_ha]])
+        : null;
+
+    const totalCost =
+      headerMap.total_cost_per_ha !== undefined
+        ? parseNumber(row[Object.keys(header)[headerMap.total_cost_per_ha]])
+        : null;
+
+    const variableCost =
+      headerMap.variable_cost_per_ha !== undefined
+        ? parseNumber(row[Object.keys(header)[headerMap.variable_cost_per_ha]])
+        : null;
+
+    const fixedCost =
+      headerMap.fixed_cost_per_ha !== undefined
+        ? parseNumber(row[Object.keys(header)[headerMap.fixed_cost_per_ha]])
+        : null;
+
+    const capitalCost =
+      headerMap.capital_cost_per_ha !== undefined
+        ? parseNumber(row[Object.keys(header)[headerMap.capital_cost_per_ha]])
+        : null;
+
+    const otherBenefit =
+      headerMap.other_benefit_per_ha !== undefined
+        ? parseNumber(row[Object.keys(header)[headerMap.other_benefit_per_ha]])
+        : null;
+
+    prepared.push({
+      trial_id:
+        headerMap.trial_id !== undefined
+          ? String(row[Object.keys(header)[headerMap.trial_id]] || "").trim()
+          : "",
+      treatment_name: treatmentName,
+      is_control: isControl,
+      yield_t_ha: yieldValue,
+      total_cost_per_ha: totalCost,
+      variable_cost_per_ha: variableCost,
+      fixed_cost_per_ha: fixedCost,
+      capital_cost_per_ha: capitalCost,
+      other_benefit_per_ha: otherBenefit
+    });
+  });
+
+  const controlRows = prepared.filter((r) => r.is_control);
+  const treatmentRows = prepared.filter((r) => !r.is_control);
+
+  return {
+    prepared,
+    controlRows,
+    treatmentRows
+  };
+}
+
+function aggregateTreatments() {
+  const rows = state.rawRows;
+  if (!rows.length) {
+    state.aggregates = [];
+    return;
+  }
+
+  const byTreatment = new Map();
+  rows.forEach((row) => {
+    const name = row.treatment_name || "";
+    if (!name) return;
+    if (!byTreatment.has(name)) {
+      byTreatment.set(name, []);
+    }
+    byTreatment.get(name).push(row);
+  });
+
+  const aggregates = [];
+  byTreatment.forEach((group, name) => {
+    const yields = group.map((r) => r.yield_t_ha).filter((v) => v !== null && !Number.isNaN(v));
+    const totalCosts = group.map((r) => r.total_cost_per_ha).filter((v) => v !== null && !Number.isNaN(v));
+    const variableCosts = group.map((r) => r.variable_cost_per_ha).filter((v) => v !== null && !Number.isNaN(v));
+    const fixedCosts = group.map((r) => r.fixed_cost_per_ha).filter((v) => v !== null && !Number.isNaN(v));
+    const capitalCosts = group.map((r) => r.capital_cost_per_ha).filter((v) => v !== null && !Number.isNaN(v));
+    const otherBenefits = group.map((r) => r.other_benefit_per_ha).filter((v) => v !== null && !Number.isNaN(v));
+
+    const avg = (arr) => {
+      if (!arr.length) return null;
+      const sum = arr.reduce((a, b) => a + b, 0);
+      return sum / arr.length;
     };
 
-    toast.querySelector(".toast-dismiss").addEventListener("click", remove);
-    setTimeout(remove, timeoutMs);
-  }
-  function escapeHtml(value) {
-    return String(value ?? "")
-      .replace(/&/g, "&amp;")
-      .replace(/</g, "&lt;")
-      .replace(/>/g, "&gt;")
-      .replace(/"/g, "&quot;")
-      .replace(/'/g, "&#39;");
+    aggregates.push({
+      treatment_name: name,
+      is_control: group.some((r) => r.is_control),
+      n_plots: group.length,
+      avg_yield_t_ha: avg(yields),
+      avg_total_cost_per_ha: avg(totalCosts),
+      avg_variable_cost_per_ha: avg(variableCosts),
+      avg_fixed_cost_per_ha: avg(fixedCosts),
+      avg_capital_cost_per_ha: avg(capitalCosts),
+      avg_other_benefit_per_ha: avg(otherBenefits)
+    });
+  });
+
+  state.aggregates = aggregates;
+}
+
+function computeCBA() {
+  const s = state.scenario;
+  const price = s.pricePerTonne;
+  const T = s.timeHorizon;
+  const r = s.discountRate / 100;
+
+  const agg = state.aggregates;
+  if (!agg.length || !state.controlName) {
+    state.cbaResults = [];
+    state.basicAnalysisOnly = false;
+    return;
   }
 
-  function parseNumber(value) {
-    if (value === null || value === undefined) return NaN;
-    if (typeof value === "number") return Number.isFinite(value) ? value : NaN;
-    const trimmed = String(value).trim();
-    if (!trimmed) return NaN;
-    const cleaned = trimmed.replace(/,/g, "");
-    const num = Number(cleaned);
-    return Number.isFinite(num) ? num : NaN;
+  const control = agg.find((a) => a.treatment_name === state.controlName && a.is_control);
+  if (!control) {
+    state.cbaResults = [];
+    state.basicAnalysisOnly = false;
+    return;
   }
 
-  function parseBoolean(value) {
-    if (value === null || value === undefined) return false;
-    const s = String(value).trim().toLowerCase();
-    return s === "true" || s === "1" || s === "yes" || s === "y";
-  }
+  const includeCapital = agg.some((a) => a.avg_capital_cost_per_ha !== null);
+  const includeOtherBenefit = agg.some((a) => a.avg_other_benefit_per_ha !== null);
 
-  function discountFactorSum(discountRatePct, years) {
-    const r = discountRatePct / 100;
-    if (years <= 0) return 0;
-    if (r === 0) return years;
-    let sum = 0;
-    for (let t = 1; t <= years; t++) {
-      sum += 1 / Math.pow(1 + r, t);
+  const rows = [];
+  let basicOnly = false;
+
+  agg.forEach((t) => {
+    const yieldVal = t.avg_yield_t_ha;
+    const totalCost = t.avg_total_cost_per_ha;
+    if (yieldVal === null || totalCost === null) {
+      basicOnly = true;
     }
-    return sum;
-  }
 
-  function meanIgnoringNaN(values) {
-    if (!values || values.length === 0) return NaN;
-    let sum = 0;
-    let n = 0;
-    for (const v of values) {
-      const x = parseNumber(v);
-      if (!Number.isNaN(x)) {
-        sum += x;
-        n++;
+    const revenuePerHa = yieldVal !== null ? yieldVal * price : null;
+    const netAnnualPerHa =
+      revenuePerHa !== null && totalCost !== null ? revenuePerHa - totalCost : null;
+
+    const otherBenefit = t.avg_other_benefit_per_ha;
+    const capitalCost = t.avg_capital_cost_per_ha;
+
+    let npv = null;
+    let bcr = null;
+    let payback = null;
+
+    if (!basicOnly && netAnnualPerHa !== null) {
+      const annuityFactor =
+        r === 0 ? T : (1 - Math.pow(1 + r, -T)) / r;
+      const totalNet = netAnnualPerHa * annuityFactor;
+
+      const capitalOutlay = capitalCost !== null ? capitalCost : 0;
+      const capitalNPV = capitalOutlay;
+
+      const otherNPV =
+        otherBenefit !== null ? otherBenefit * annuityFactor : 0;
+
+      npv = totalNet + otherNPV - capitalNPV;
+
+      const totalCostPresent =
+        capitalNPV +
+        totalCost * annuityFactor -
+        (otherBenefit !== null ? otherBenefit * annuityFactor : 0);
+
+      if (totalCostPresent > 0) {
+        bcr = (totalNet + otherNPV) / totalCostPresent;
+      }
+
+      if (netAnnualPerHa > 0) {
+        payback = capitalOutlay / netAnnualPerHa;
       }
     }
-    return n === 0 ? NaN : sum / n;
+
+    rows.push({
+      treatment_name: t.treatment_name,
+      is_control: t.is_control,
+      n_plots: t.n_plots,
+      avg_yield_t_ha: yieldVal,
+      avg_total_cost_per_ha: totalCost,
+      avg_variable_cost_per_ha: t.avg_variable_cost_per_ha,
+      avg_fixed_cost_per_ha: t.avg_fixed_cost_per_ha,
+      avg_capital_cost_per_ha: capitalCost,
+      avg_other_benefit_per_ha: otherBenefit,
+      revenue_per_ha: revenuePerHa,
+      net_annual_per_ha: netAnnualPerHa,
+      npv_per_ha: npv,
+      bcr,
+      payback_years: payback,
+      includeCapital,
+      includeOtherBenefit
+    });
+  });
+
+  state.cbaResults = rows;
+  state.basicAnalysisOnly = basicOnly;
+}
+
+function renderResultsSummary() {
+  const container = document.getElementById("resultsSummary");
+  if (!container) return;
+
+  if (!state.cbaResults.length) {
+    container.innerHTML =
+      "<p class=\"small muted\">Results will appear here once data have been uploaded and a control has been selected.</p>";
+    document.getElementById("basicAnalysisNote").style.display = "none";
+    document.getElementById("indicativeBadge").style.display = "none";
+    return;
   }
 
-  function formatCurrency(value) {
-    if (value === null || value === undefined || Number.isNaN(value)) return "-";
-    try {
-      return new Intl.NumberFormat("en-AU", {
-        style: "currency",
-        currency: "AUD",
-        maximumFractionDigits: Math.abs(value) < 1000 ? 2 : 0
-      }).format(value);
-    } catch (_) {
-      return value.toFixed(0);
+  const cards = [];
+  const controlRow = state.cbaResults.find((r) => r.is_control);
+  const treatments = state.cbaResults.filter((r) => !r.is_control);
+
+  const bestByNPV = [...treatments].filter((t) => t.npv_per_ha !== null);
+  bestByNPV.sort((a, b) => (b.npv_per_ha || 0) - (a.npv_per_ha || 0));
+  const leading = bestByNPV[0] || null;
+
+  const bodyParts = [];
+
+  if (leading && controlRow && leading.npv_per_ha !== null && controlRow.npv_per_ha !== null) {
+    const diff = leading.npv_per_ha - controlRow.npv_per_ha;
+    bodyParts.push(
+      `<div class="results-card">
+        <div class="results-card-title">Top treatment by NPV</div>
+        <div class="results-card-value">${leading.treatment_name}</div>
+        <div class="results-card-sub">Improves NPV by ${formatCurrency(
+          diff,
+          0
+        )} per hectare relative to the control.</div>
+      </div>`
+    );
+  }
+
+  const positiveCount = treatments.filter((t) => t.npv_per_ha && t.npv_per_ha > 0).length;
+  const nonPositiveCount = treatments.length - positiveCount;
+  bodyParts.push(
+    `<div class="results-card">
+      <div class="results-card-title">How many look attractive?</div>
+      <div class="results-card-value">${positiveCount} of ${treatments.length}</div>
+      <div class="results-card-sub">Treatments with NPV above zero per hectare (given current assumptions).</div>
+    </div>`
+  );
+
+  const betterBCR = treatments.filter(
+    (t) => t.bcr !== null && controlRow && controlRow.bcr !== null && t.bcr > controlRow.bcr
+  ).length;
+  bodyParts.push(
+    `<div class="results-card">
+      <div class="results-card-title">Better benefit-cost ratio</div>
+      <div class="results-card-value">${betterBCR}</div>
+      <div class="results-card-sub">Treatments with higher BCR than the control.</div>
+    </div>`
+  );
+
+  if (nonPositiveCount > 0) {
+    bodyParts.push(
+      `<div class="results-card">
+        <div class="results-card-title">Treatments that do not pay back</div>
+        <div class="results-card-value">${nonPositiveCount}</div>
+        <div class="results-card-sub">Treatments where net present value is at or below zero per hectare.</div>
+      </div>`
+    );
+  }
+
+  container.innerHTML = `<div class="results-summary-grid">${bodyParts.join("")}</div>`;
+
+  const basicNote = document.getElementById("basicAnalysisNote");
+  const indicativeBadge = document.getElementById("indicativeBadge");
+
+  if (state.basicAnalysisOnly) {
+    basicNote.style.display = "block";
+    indicativeBadge.style.display = "inline-flex";
+  } else {
+    basicNote.style.display = "none";
+    indicativeBadge.style.display = "none";
+  }
+}
+
+function renderComparisonTable() {
+  const table = document.getElementById("comparisonTable").querySelector("tbody");
+  if (!table) return;
+
+  table.innerHTML = "";
+
+  if (!state.cbaResults.length || !state.controlName) {
+    return;
+  }
+
+  const control = state.cbaResults.find((r) => r.is_control);
+  if (!control) return;
+
+  const treatments = state.cbaResults.filter((r) => !r.is_control);
+
+  const rows = [
+    {
+      label: "Net present value (NPV) per hectare",
+      controlVal: control.npv_per_ha,
+      getTreatmentVal: (t) => t.npv_per_ha,
+      formatter: (v) => formatCurrency(v, 0)
+    },
+    {
+      label: "Benefit-cost ratio (BCR)",
+      controlVal: control.bcr,
+      getTreatmentVal: (t) => t.bcr,
+      formatter: (v) =>
+        v === null || v === undefined || Number.isNaN(v) ? "" : v.toFixed(2)
+    },
+    {
+      label: "Payback period (years)",
+      controlVal: control.payback_years,
+      getTreatmentVal: (t) => t.payback_years,
+      formatter: (v) =>
+        v === null || v === undefined || Number.isNaN(v) ? "" : v.toFixed(1)
+    },
+    {
+      label: "Net return per hectare (annual)",
+      controlVal: control.net_annual_per_ha,
+      getTreatmentVal: (t) => t.net_annual_per_ha,
+      formatter: (v) => formatCurrency(v, 0)
+    },
+    {
+      label: "Average yield (t/ha)",
+      controlVal: control.avg_yield_t_ha,
+      getTreatmentVal: (t) => t.avg_yield_t_ha,
+      formatter: (v) => formatNumber(v, 2)
+    },
+    {
+      label: "Average total cost ($/ha)",
+      controlVal: control.avg_total_cost_per_ha,
+      getTreatmentVal: (t) => t.avg_total_cost_per_ha,
+      formatter: (v) => formatCurrency(v, 0)
     }
-  }
+  ];
 
-  function formatNumber(value, decimals = 2) {
-    if (value === null || value === undefined || Number.isNaN(value)) return "-";
-    return value.toFixed(decimals);
-  }
+  treatments.forEach((treatment) => {
+    rows.forEach((rowDef) => {
+      const tr = document.createElement("tr");
+      const labelCell = document.createElement("td");
+      const controlCell = document.createElement("td");
+      const treatmentCell = document.createElement("td");
+      const diffCell = document.createElement("td");
 
-  function clone(obj) {
-    return JSON.parse(JSON.stringify(obj));
-  }
+      labelCell.textContent = rowDef.label;
 
-  // =========================
-  // 2) DATA PARSING
-  // =========================
+      controlCell.textContent = rowDef.formatter(rowDef.controlVal);
+      const treatmentVal = rowDef.getTreatmentVal(treatment);
+      treatmentCell.textContent = rowDef.formatter(treatmentVal);
 
-  function detectDelimiter(headerLine) {
-    if (!headerLine) return "\t";
-    const tabCount = (headerLine.match(/\t/g) || []).length;
-    const commaCount = (headerLine.match(/,/g) || []).length;
-    return tabCount >= commaCount ? "\t" : ",";
-  }
-
-  function parseDelimitedText(text) {
-    const trimmed = text.replace(/\r\n/g, "\n").trim();
-    if (!trimmed) {
-      throw new Error("No data found in the provided text.");
-    }
-
-    const lines = trimmed.split("\n").filter((l) => l.trim().length > 0);
-    const delimiter = detectDelimiter(lines[0]);
-    const headers = lines[0].split(delimiter).map((h) => h.trim());
-    const rows = [];
-
-    for (let i = 1; i < lines.length; i++) {
-      const parts = lines[i].split(delimiter);
-      const row = {};
-      for (let j = 0; j < headers.length; j++) {
-        row[headers[j]] = j < parts.length ? parts[j] : "";
+      let diff = null;
+      if (rowDef.controlVal !== null && treatmentVal !== null) {
+        diff = treatmentVal - rowDef.controlVal;
       }
-      rows.push(row);
-    }
-    return { headers, rows };
+
+      if (rowDef.label.includes("BCR")) {
+        diffCell.textContent =
+          diff === null || Number.isNaN(diff)
+            ? ""
+            : diff >= 0
+            ? `+${diff.toFixed(2)}`
+            : diff.toFixed(2);
+      } else if (rowDef.label.includes("Payback")) {
+        diffCell.textContent =
+          diff === null || Number.isNaN(diff)
+            ? ""
+            : diff >= 0
+            ? `+${diff.toFixed(1)}`
+            : diff.toFixed(1);
+      } else if (rowDef.label.includes("yield")) {
+        diffCell.textContent =
+          diff === null || Number.isNaN(diff)
+            ? ""
+            : diff >= 0
+            ? `+${formatNumber(diff, 2)}`
+            : formatNumber(diff, 2);
+      } else {
+        diffCell.textContent =
+          diff === null || Number.isNaN(diff)
+            ? ""
+            : diff >= 0
+            ? `+${formatCurrency(diff, 0)}`
+            : formatCurrency(diff, 0);
+      }
+
+      tr.appendChild(labelCell);
+      tr.appendChild(controlCell);
+      tr.appendChild(treatmentCell);
+      tr.appendChild(diffCell);
+
+      table.appendChild(tr);
+    });
+  });
+}
+
+function renderReplicateSummary() {
+  const tbody = document.getElementById("replicateSummaryTable").querySelector("tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  if (!state.aggregates.length) return;
+
+  state.aggregates.forEach((a) => {
+    const tr = document.createElement("tr");
+    const tCell = document.createElement("td");
+    tCell.textContent = a.treatment_name;
+    const yCell = document.createElement("td");
+    yCell.textContent = formatNumber(a.avg_yield_t_ha, 2);
+    const cCell = document.createElement("td");
+    cCell.textContent = formatCurrency(a.avg_total_cost_per_ha, 0);
+    const nCell = document.createElement("td");
+    nCell.textContent = a.n_plots;
+
+    tr.appendChild(tCell);
+    tr.appendChild(yCell);
+    tr.appendChild(cCell);
+    tr.appendChild(nCell);
+
+    tbody.appendChild(tr);
+  });
+}
+
+function renderLeaderboard() {
+  const tbody = document.getElementById("leaderboardTable").querySelector("tbody");
+  if (!tbody) return;
+  tbody.innerHTML = "";
+
+  if (!state.cbaResults.length) {
+    return;
   }
 
-  // Map required semantic columns to actual dataset headers
-  function normaliseHeaderForMatch(value) {
-    const s = String(value || "").trim().toLowerCase();
-    if (!s) return "";
-    return s
-      .replace(/\uFEFF/g, "")
-      .replace(/[^a-z0-9]+/g, "_")
-      .replace(/^_+|_+$/g, "")
-      .replace(/_+/g, "_");
+  const metricSelect = document.getElementById("leaderboardMetric");
+  const metric = metricSelect ? metricSelect.value : "npv";
+
+  const records = state.cbaResults.filter((r) => !r.is_control);
+  if (!records.length) return;
+
+  let comparator;
+
+  if (metric === "bcr") {
+    comparator = (a, b) => (b.bcr || 0) - (a.bcr || 0);
+  } else if (metric === "payback") {
+    comparator = (a, b) => {
+      const pa = a.payback_years || Number.POSITIVE_INFINITY;
+      const pb = b.payback_years || Number.POSITIVE_INFINITY;
+      return pa - pb;
+    };
+  } else if (metric === "netReturnPerHa") {
+    comparator = (a, b) => (b.net_annual_per_ha || 0) - (a.net_annual_per_ha || 0);
+  } else {
+    comparator = (a, b) => (b.npv_per_ha || 0) - (a.npv_per_ha || 0);
   }
 
-  function normaliseHeaderForLooseMatch(value) {
-    return normaliseHeaderForMatch(value).replace(/_/g, "");
-  }
+  records.sort(comparator);
 
-  // Map required semantic columns to actual dataset headers (tolerant to common variants)
-  function detectColumnMap(headers) {
-    const lcHeaders = headers.map((h) => String(h || "").toLowerCase());
-    const normHeaders = headers.map((h) => normaliseHeaderForMatch(h));
-    const looseHeaders = headers.map((h) => normaliseHeaderForLooseMatch(h));
+  records.forEach((r) => {
+    const tr = document.createElement("tr");
+    const nameCell = document.createElement("td");
+    nameCell.textContent = r.treatment_name;
 
-    const findCol = (aliases) => {
-      for (const alias of aliases) {
-        const a = String(alias || "");
-        const aLc = a.toLowerCase();
-        const aNorm = normaliseHeaderForMatch(a);
-        const aLoose = normaliseHeaderForLooseMatch(a);
+    const npvCell = document.createElement("td");
+    npvCell.textContent = formatCurrency(r.npv_per_ha, 0);
 
-        // Exact match
-        let idx = lcHeaders.indexOf(aLc);
-        if (idx !== -1) return headers[idx];
+    const bcrCell = document.createElement("td");
+    bcrCell.textContent =
+      r.bcr === null || r.bcr === undefined || Number.isNaN(r.bcr)
+        ? ""
+        : r.bcr.toFixed(2);
 
-        // Normalised match
-        idx = normHeaders.indexOf(aNorm);
-        if (idx !== -1) return headers[idx];
+    const paybackCell = document.createElement("td");
+    paybackCell.textContent =
+      r.payback_years === null || r.payback_years === undefined || Number.isNaN(r.payback_years)
+        ? ""
+        : r.payback_years.toFixed(1);
 
-        // Loose match (ignores underscores and punctuation)
-        idx = looseHeaders.indexOf(aLoose);
-        if (idx !== -1) return headers[idx];
+    const netCell = document.createElement("td");
+    netCell.textContent = formatCurrency(r.net_annual_per_ha, 0);
 
-        // Partial match as a last resort (safe only for unique hits)
-        const partialHits = [];
-        for (let i = 0; i < looseHeaders.length; i++) {
-          if (!looseHeaders[i]) continue;
-          if (looseHeaders[i] === aLoose) {
-            partialHits.push(i);
-          } else if (looseHeaders[i].includes(aLoose) && aLoose.length >= 6) {
-            partialHits.push(i);
+    tr.appendChild(nameCell);
+    tr.appendChild(npvCell);
+    tr.appendChild(bcrCell);
+    tr.appendChild(paybackCell);
+    tr.appendChild(netCell);
+
+    tbody.appendChild(tr);
+  });
+}
+
+function buildChartOptions(title) {
+  return {
+    responsive: true,
+    scales: {
+      x: {
+        ticks: {
+          autoSkip: false,
+          maxRotation: 0,
+          minRotation: 0
+        }
+      },
+      y: {
+        beginAtZero: true
+      }
+    },
+    plugins: {
+      title: {
+        display: false
+      },
+      legend: {
+        display: false
+      },
+      tooltip: {
+        callbacks: {
+          label(context) {
+            if (context.parsed.y === null || context.parsed.y === undefined) {
+              return "";
+            }
+            return context.parsed.y.toLocaleString();
           }
         }
-        if (partialHits.length === 1) return headers[partialHits[0]];
-      }
-      return null;
-    };
-
-    const map = {
-      plotId: findCol(["plot_id", "plotid", "plot", "plot_no", "plotnumber"]),
-      replicate: findCol(["replicate_id", "replicate", "rep", "rep_no", "repno", "replicateid"]),
-      treatmentName: findCol(["treatment_name", "treatment", "amendment_name", "amendment", "treatmentname"]),
-      isControl: findCol(["is_control", "control_flag", "control", "iscontrol", "controlindicator"]),
-      yield: findCol(["yield_t_ha", "yield", "yieldtha", "yield_t/ha", "yield_tonnes_ha", "yield_tonnes_per_ha"]),
-      variableCost: findCol([
-        "total_cost_per_ha",
-        "variable_cost_per_ha",
-        "totalcostperha",
-        "variablecostperha",
-        "total_cost_ha",
-        "total_cost_perha"
-      ]),
-      capitalCost: findCol([
-        "cost_amendment_input_per_ha",
-        "capital_cost_per_ha",
-        "capitalcostperha",
-        "amendment_cost_per_ha"
-      ])
-    };
-
-    return map;
-  }
-
-  function setUploadStatus(message = "", type = "") {
-    const el = document.getElementById("uploadStatus");
-    if (!el) return;
-    el.textContent = message || "";
-    el.className = "upload-status" + (type ? ` ${type}` : "");
-  }
-
-  
-  function buildNearMatchSuggestions(headers, missingCanonical) {
-    const suggestions = {};
-    const loose = headers.map((h) => normaliseHeaderForLooseMatch(h));
-    for (const canon of missingCanonical) {
-      const cLoose = normaliseHeaderForLooseMatch(canon);
-      const hits = [];
-      for (let i = 0; i < headers.length; i++) {
-        if (!loose[i]) continue;
-        if (loose[i] === cLoose) hits.push(headers[i]);
-        else if (loose[i].includes(cLoose) || cLoose.includes(loose[i])) hits.push(headers[i]);
-      }
-      suggestions[canon] = hits.slice(0, 5);
-    }
-    return suggestions;
-  }
-
-  function validateParsedData(headers, rows) {
-    const map = detectColumnMap(headers);
-
-    const required = {
-      treatment_name: map.treatmentName,
-      is_control: map.isControl,
-      yield_t_ha: map.yield,
-      total_cost_per_ha: map.variableCost
-    };
-
-    const missing = Object.entries(required)
-      .filter(([, v]) => !v)
-      .map(([k]) => k);
-
-    const errors = [];
-    const warnings = [];
-
-    if (missing.length) {
-      const near = buildNearMatchSuggestions(headers, missing);
-      const parts = missing.map((c) => {
-        const hits = near[c] && near[c].length ? ` Near matches found: ${near[c].join(", ")}.` : "";
-        return `${c}.${hits}`;
-      });
-      errors.push(
-        `Missing required column${missing.length === 1 ? "" : "s"}: ${missing.join(", ")}. ` +
-          `Download the template and copy these column names exactly, or rename your headers to match. ` +
-          parts.join(" ")
-      );
-    }
-
-    let controlRows = 0;
-    let treatmentRows = 0;
-    let controlNames = new Set();
-    let controlHasCore = false;
-    let treatmentHasCore = false;
-
-    if (map.treatmentName && map.isControl) {
-      for (const row of rows) {
-        const nameRaw = row[map.treatmentName];
-        const name = nameRaw ? String(nameRaw).trim() : "";
-        if (!name) continue;
-
-        const isCtrl = parseBoolean(row[map.isControl]);
-        const y = map.yield ? parseNumber(row[map.yield]) : NaN;
-        const c = map.variableCost ? parseNumber(row[map.variableCost]) : NaN;
-        const hasCore = !Number.isNaN(y) && !Number.isNaN(c);
-
-        if (isCtrl) {
-          controlRows += 1;
-          controlNames.add(name);
-          if (hasCore) controlHasCore = true;
-        } else {
-          treatmentRows += 1;
-          if (hasCore) treatmentHasCore = true;
-        }
       }
     }
+  };
+}
 
-    if (!missing.length) {
-      if (controlRows < 1) {
-        errors.push(
-          `No control identified. Look for the is_control column and set at least one row to TRUE (or 1 or yes). Example: for your control treatment rows, set is_control to TRUE.`
-        );
-      }
-      if (treatmentRows < 1) {
-        errors.push(
-          `No treatment rows found. Look for the is_control column and ensure at least one row is marked FALSE (or 0 or no). Example: for non-control treatments, set is_control to FALSE.`
-        );
-      }
-      if (!controlHasCore || !treatmentHasCore) {
-        errors.push(
-          `Core fields are missing or not numeric. Look for yield_t_ha and total_cost_per_ha and ensure there are numeric values for some control rows and some treatment rows. Example: yield_t_ha = 2.6 and total_cost_per_ha = 150.`
-        );
-      }
-    }
+function ensureCharts() {
+  const labels = state.cbaResults
+    .filter((r) => !r.is_control)
+    .map((r) => r.treatment_name);
 
-    // Non-blocking warnings for optional fields and common unit issues.
-    if (!map.capitalCost) {
-      warnings.push(
-        `Optional column not detected: cost_amendment_input_per_ha. If you have one-off establishment costs, include them here. Otherwise the tool assumes zero.`
-      );
-    }
+  const npvData = state.cbaResults
+    .filter((r) => !r.is_control)
+    .map((r) => (r.npv_per_ha !== null ? Math.round(r.npv_per_ha) : null));
 
-    // Unit and outlier checks (non-blocking)
-    if (!missing.length && map.yield) {
-      let maxYield = -Infinity;
-      let minYield = Infinity;
-      for (const row of rows) {
-        const y = parseNumber(row[map.yield]);
-        if (!Number.isNaN(y)) {
-          if (y > maxYield) maxYield = y;
-          if (y < minYield) minYield = y;
-        }
-      }
-      if (minYield < 0) {
-        warnings.push(
-          `Some yields are negative. Check yield_t_ha values and units.`
-        );
-      }
-      if (maxYield > 60) {
-        warnings.push(
-          `Some yields are very large (maximum ${formatNumber(maxYield, 2)}). Check that yield is in tonnes per hectare, not kilograms per hectare. Example: 3000 kg/ha should be entered as 3.0 t/ha.`
-        );
-      }
-    }
+  const bcrData = state.cbaResults
+    .filter((r) => !r.is_control)
+    .map((r) => (r.bcr !== null ? Number(r.bcr.toFixed(2)) : null));
 
-    if (!missing.length && map.variableCost) {
-      let maxCost = -Infinity;
-      let minCost = Infinity;
-      for (const row of rows) {
-        const c = parseNumber(row[map.variableCost]);
-        if (!Number.isNaN(c)) {
-          if (c > maxCost) maxCost = c;
-          if (c < minCost) minCost = c;
-        }
-      }
-      if (minCost < 0) {
-        warnings.push(
-          `Some costs are negative. Check total_cost_per_ha values.`
-        );
-      }
-      if (maxCost > 200000) {
-        warnings.push(
-          `Some costs are very large (maximum ${formatCurrency(maxCost)}). Check whether costs are in cents rather than dollars. Example: 25000 cents should be entered as 250 dollars.`
-        );
-      }
-    }
-
-    const stats = {
-      rowCount: rows.length,
-      columnCount: headers.length,
-      treatmentCount: 0,
-      controlRowCount: controlRows,
-      treatmentRowCount: treatmentRows
-    };
-
-    // Treatment count based on detected treatment_name
-    if (map.treatmentName) {
-      const names = new Set();
-      for (const row of rows) {
-        const v = row[map.treatmentName];
-        const n = v ? String(v).trim() : "";
-        if (n) names.add(n);
-      }
-      stats.treatmentCount = names.size;
-    }
-
-    const controlCandidates = Array.from(controlNames.values());
-
-    // Mapping report for transparency
-    const mapping = {
-      treatment_name: map.treatmentName || "",
-      is_control: map.isControl || "",
-      yield_t_ha: map.yield || "",
-      total_cost_per_ha: map.variableCost || "",
-      cost_amendment_input_per_ha: map.capitalCost || ""
-    };
-
-    const canRun = errors.length === 0;
-    return { canRun, errors, warnings, map, stats, controlCandidates, mapping };
-  }
-function normaliseTemplateHeaders(headers) {
-    // Ensure we preserve the exact column names users will upload (case-sensitive).
-    return headers.filter((h) => String(h || "").trim().length > 0);
-  }
-
-  // =========================
-  // 3) AGGREGATION & CBA
-  // =========================
-
-  function aggregateTreatments() {
-    const { headers, rows } = state;
-    if (!headers.length || !rows.length) {
-      state.treatments = [];
-      state.controlName = null;
-      state.columnMap = null;
-      return;
-    }
-
-    const columnMap = detectColumnMap(headers);
-    state.columnMap = columnMap;
-
-    const summaryByName = new Map();
-    const flaggedControls = new Set();
-
-    let yieldMissingCount = 0;
-    let costMissingCount = 0;
-
-    for (const row of rows) {
-      const tNameRaw = columnMap.treatmentName ? row[columnMap.treatmentName] : "";
-      const treatmentName = tNameRaw ? String(tNameRaw).trim() : "";
-      if (!treatmentName) continue;
-
-      if (!summaryByName.has(treatmentName)) {
-        summaryByName.set(treatmentName, {
-          name: treatmentName,
-          replicates: [],
-          yields: [],
-          variableCosts: [],
-          capitalCosts: [],
-          isControlFlagged: false
-        });
-      }
-      const t = summaryByName.get(treatmentName);
-
-      const repVal = columnMap.replicate ? row[columnMap.replicate] : null;
-      if (repVal !== null && repVal !== undefined && String(repVal).trim()) {
-        t.replicates.push(repVal);
-      }
-
-      if (columnMap.yield) {
-        const y = parseNumber(row[columnMap.yield]);
-        if (!Number.isNaN(y)) t.yields.push(y);
-        else yieldMissingCount += 1;
-      }
-      if (columnMap.variableCost) {
-        const vc = parseNumber(row[columnMap.variableCost]);
-        if (!Number.isNaN(vc)) t.variableCosts.push(vc);
-        else costMissingCount += 1;
-      }
-      if (columnMap.capitalCost) {
-        const cc = parseNumber(row[columnMap.capitalCost]);
-        if (!Number.isNaN(cc)) t.capitalCosts.push(cc);
-      }
-      if (columnMap.isControl) {
-        const isCtrl = parseBoolean(row[columnMap.isControl]);
-        if (isCtrl) {
-          t.isControlFlagged = true;
-          flaggedControls.add(treatmentName);
-        }
-      }
-    }
-
-    // Decide control treatment.
-    let controlName = null;
-
-    if (flaggedControls.size === 1) {
-      controlName = Array.from(flaggedControls)[0];
-    } else if (flaggedControls.size > 1) {
-      // Keep current selection if still valid, otherwise choose the first flagged option.
-      if (state.controlName && flaggedControls.has(state.controlName)) controlName = state.controlName;
-      else controlName = Array.from(flaggedControls)[0];
-    } else {
-      // No explicit control flag, fall back to name heuristic
-      for (const name of summaryByName.keys()) {
-        if (name.toLowerCase().includes("control")) {
-          controlName = name;
-          break;
-        }
-      }
-      if (!controlName && summaryByName.size > 0) controlName = summaryByName.keys().next().value;
-    }
-
-    state.controlName = controlName || null;
-
-    const treatments = [];
-    for (const [name, t] of summaryByName.entries()) {
-      const avgYield = meanIgnoringNaN(t.yields);
-      const avgVarCost = meanIgnoringNaN(t.variableCosts);
-
-      const capMean = meanIgnoringNaN(t.capitalCosts);
-      const avgCapCost = Number.isNaN(capMean) ? 0 : capMean;
-
-      treatments.push({
-        name,
-        isControl: name === state.controlName,
-        avgYield,
-        avgVarCost,
-        avgCapCost,
-        replicateCount: Math.max(t.yields.length, t.variableCosts.length, 0),
-        isControlFlagged: t.isControlFlagged
-      });
-    }
-
-    state.treatments = treatments;
-
-    // Assumptions and defaults applied
-    state.assumptions = {
-      capitalCostAssumedZero: !columnMap.capitalCost,
-      missingYieldCells: yieldMissingCount,
-      missingCostCells: costMissingCount
-    };
-  }
-
-  function computeCBA() {
-    const { treatments, controlName, params } = state;
-    if (!treatments.length || !controlName) return;
-
-    const control = treatments.find((t) => t.name === controlName) || treatments[0];
-
-    const price = parseNumber(params.pricePerTonne) || 0;
-    const years = Math.max(1, parseInt(params.years, 10) || 1);
-    const persistenceYears = Math.max(
-      1,
-      Math.min(years, parseInt(params.persistenceYears, 10) || years)
+  const paybackData = state.cbaResults
+    .filter((r) => !r.is_control)
+    .map((r) =>
+      r.payback_years !== null && Number.isFinite(r.payback_years)
+        ? Number(r.payback_years.toFixed(1))
+        : null
     );
-    const discountRate = parseNumber(params.discountRate);
-    const factorBenefits = discountFactorSum(discountRate, persistenceYears);
-    const factorCosts = discountFactorSum(discountRate, years);
 
-    const results = [];
-    for (const t of treatments) {
-      const avgYield = parseNumber(t.avgYield);
-      const avgVarCost = parseNumber(t.avgVarCost);
-      const avgCapCost = parseNumber(t.avgCapCost);
-
-      const pvBenefits = Number.isNaN(avgYield)
-        ? NaN
-        : avgYield * price * factorBenefits;
-      const pvVarCosts = Number.isNaN(avgVarCost) ? NaN : avgVarCost * factorCosts;
-      const pvCapCosts = Number.isNaN(avgCapCost) ? NaN : avgCapCost;
-      let pvTotalCosts = NaN;
-      if (!Number.isNaN(pvVarCosts)) {
-        pvTotalCosts = pvVarCosts + (Number.isNaN(pvCapCosts) ? 0 : pvCapCosts);
-      } else if (!Number.isNaN(pvCapCosts) && pvCapCosts > 0) {
-        pvTotalCosts = pvCapCosts;
-      }
-      const npv =
-        Number.isNaN(pvBenefits) || Number.isNaN(pvTotalCosts)
-          ? NaN
-          : pvBenefits - pvTotalCosts;
-      const bcr =
-        !Number.isNaN(pvBenefits) && pvTotalCosts > 0
-          ? pvBenefits / pvTotalCosts
-          : NaN;
-      const roi =
-        !Number.isNaN(npv) && pvTotalCosts > 0
-          ? (npv / pvTotalCosts) * 100
-          : NaN;
-
-      results.push({
-        name: t.name,
-        isControl: t.name === controlName,
-        avgYield,
-        avgVarCost,
-        avgCapCost,
-        pvBenefits,
-        pvTotalCosts,
-        npv,
-        bcr,
-        roi,
-        meanOutcome: avgYield,
-        meanCost: (Number.isNaN(avgVarCost) ? NaN : avgVarCost) + (Number.isNaN(avgCapCost) ? 0 : avgCapCost),
-        netAnnualValue:
-          Number.isNaN(avgYield) || Number.isNaN(avgVarCost)
-            ? NaN
-            : avgYield * price - avgVarCost - (Number.isNaN(avgCapCost) ? 0 : avgCapCost)
-      });
-    }
-
-    // Control metrics
-    const controlRes = results.find((r) => r.isControl) || results[0];
-    const cPvBenefits = controlRes.pvBenefits;
-    const cPvCosts = controlRes.pvTotalCosts;
-    const cNpv = controlRes.npv;
-    const cNetAnnual = controlRes.netAnnualValue;
-
-    // Differences vs control (full and indicative)
-    for (const r of results) {
-      r.deltaPvBenefits = (Number.isNaN(r.pvBenefits) || Number.isNaN(cPvBenefits)) ? NaN : r.pvBenefits - cPvBenefits;
-      r.deltaPvCosts = (Number.isNaN(r.pvTotalCosts) || Number.isNaN(cPvCosts)) ? NaN : r.pvTotalCosts - cPvCosts;
-      r.deltaNpv = (Number.isNaN(r.npv) || Number.isNaN(cNpv)) ? NaN : r.npv - cNpv;
-      r.deltaNetAnnual = (Number.isNaN(r.netAnnualValue) || Number.isNaN(cNetAnnual)) ? NaN : r.netAnnualValue - cNetAnnual;
-    }
-
-    const basicOnly =
-      results.every((r) => Number.isNaN(r.npv)) &&
-      results.some((r) => !Number.isNaN(r.netAnnualValue));
-
-    if (basicOnly) {
-      // Rank on net annual value as an indicative comparison.
-      results.sort((a, b) => {
-        const aVal = Number.isNaN(a.netAnnualValue) ? -Infinity : a.netAnnualValue;
-        const bVal = Number.isNaN(b.netAnnualValue) ? -Infinity : b.netAnnualValue;
-        return bVal - aVal;
-      });
-      results.forEach((r, idx) => {
-        r.rank = idx + 1;
-        // Reuse deltaNpv slot for indicative display and exports when full NPV is not available.
-        r.deltaNpv = r.deltaNetAnnual;
-      });
-    } else {
-      results.sort((a, b) => {
-        const aVal = Number.isNaN(a.npv) ? -Infinity : a.npv;
-        const bVal = Number.isNaN(b.npv) ? -Infinity : b.npv;
-        return bVal - aVal;
-      });
-      results.forEach((r, idx) => {
-        r.rank = idx + 1;
-      });
-    }
-
-state.results = {
-      treatments: results,
-      control: controlRes,
-      price,
-      years,
-      persistenceYears,
-      discountRate,
-      basicOnly
+  function buildDataset(data) {
+    return {
+      label: "Treatment",
+      data,
+      borderWidth: 1
     };
   }
 
-  // =========================
-  // 4) RENDERING
-  // =========================
+  const npvCtx = document.getElementById("npvChart");
+  const bcrCtx = document.getElementById("bcrChart");
+  const paybackCtx = document.getElementById("paybackChart");
 
-  function renderOverview() {
-    const container = document.getElementById("overviewSummary");
-    if (!container) return;
-    container.innerHTML = "";
-
-    if (!state.rows.length || !state.treatments.length) {
-      container.innerHTML = `<p class="small muted">No dataset loaded yet.</p>`;
-      return;
-    }
-
-    const nPlots = state.rows.length;
-    const nTreatments = state.treatments.length;
-    const nReplicates = new Set(
-      state.rows
-        .map((r) =>
-          state.columnMap && state.columnMap.replicate
-            ? r[state.columnMap.replicate]
-            : null
-        )
-        .filter((x) => x !== null && x !== undefined && String(x).trim() !== "")
-    ).size;
-
-    const controlName = state.controlName || "Not identified";
-
-    const cards = [
-      {
-        label: "Plots in dataset",
-        value: nPlots
-      },
-      {
-        label: "Distinct treatments",
-        value: nTreatments
-      },
-      {
-        label: "Replicates",
-        value: nReplicates || "-"
-      },
-      {
-        label: "Control treatment",
-        value: controlName
-      }
-    ];
-
-    for (const c of cards) {
-      const div = document.createElement("div");
-      div.className = "summary-card";
-      div.innerHTML = `
-        <div class="summary-card-label">${c.label}</div>
-        <div class="summary-card-value">${c.value}</div>
-      `;
-      container.appendChild(div);
-    }
+  if (state.charts.npvChart) {
+    state.charts.npvChart.destroy();
+  }
+  if (state.charts.bcrChart) {
+    state.charts.bcrChart.destroy();
+  }
+  if (state.charts.paybackChart) {
+    state.charts.paybackChart.destroy();
   }
 
-  function renderDataSummaryAndChecks() {
-    const summaryEl = document.getElementById("dataSummary");
-    const checksEl = document.getElementById("dataChecks");
-    if (!summaryEl || !checksEl) return;
+  if (npvCtx && labels.length) {
+    state.charts.npvChart = new Chart(npvCtx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [buildDataset(npvData)]
+      },
+      options: buildChartOptions("Net present value")
+    });
+  }
 
-    if (!state.rows.length || !state.headers.length) {
-      summaryEl.textContent = "No dataset loaded.";
-      checksEl.innerHTML = "";
-      return;
-    }
+  if (bcrCtx && labels.length) {
+    state.charts.bcrChart = new Chart(bcrCtx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [buildDataset(bcrData)]
+      },
+      options: buildChartOptions("Benefit-cost ratio")
+    });
+  }
 
-    const nRows = state.rows.length;
-    const nCols = state.headers.length;
-    summaryEl.textContent = `${nRows} plot rows, ${nCols} columns. All rows and columns are used in calculations.`;
+  if (paybackCtx && labels.length) {
+    state.charts.paybackChart = new Chart(paybackCtx, {
+      type: "bar",
+      data: {
+        labels,
+        datasets: [buildDataset(paybackData)]
+      },
+      options: buildChartOptions("Payback period")
+    });
+  }
+}
 
-    const cm = state.columnMap;
-    const checks = [];
+function renderAll() {
+  setAssumptionsSummary();
+  renderResultsSummary();
+  renderComparisonTable();
+  renderReplicateSummary();
+  renderLeaderboard();
+  ensureCharts();
+  updateAIPrompt();
+}
 
-    const addCheck = (ok, label, detail, severity) => {
-      checks.push({ ok, label, detail, severity });
-    };
+function updateControlTreatmentOptions() {
+  const select = document.getElementById("controlTreatment");
+  if (!select) return;
+  const current = state.controlName;
 
-    const addColCheck = (purpose, colName) => {
-      if (colName) {
-        addCheck(
-          true,
-          `${purpose} column found`,
-          `"${colName}" is used for ${purpose.toLowerCase()}.`,
-          "ok"
-        );
+  const names = Array.from(
+    new Set(state.aggregates.filter((a) => a.is_control).map((a) => a.treatment_name))
+  );
+
+  select.innerHTML = "";
+
+  if (!names.length) {
+    const opt = document.createElement("option");
+    opt.value = "";
+    opt.textContent = "No control detected yet";
+    select.appendChild(opt);
+    return;
+  }
+
+  names.forEach((name) => {
+    const opt = document.createElement("option");
+    opt.value = name;
+    opt.textContent = name;
+    select.appendChild(opt);
+  });
+
+  if (current && names.includes(current)) {
+    select.value = current;
+  } else {
+    state.controlName = names[0];
+    select.value = names[0];
+  }
+}
+
+function onLeaderboardMetricChange() {
+  renderLeaderboard();
+}
+
+function onApplyScenario() {
+  const priceEl = document.getElementById("pricePerTonne");
+  const horizonEl = document.getElementById("timeHorizon");
+  const discountEl = document.getElementById("discountRate");
+  const controlEl = document.getElementById("controlTreatment");
+
+  const price = parseNumber(priceEl.value);
+  const horizon = parseInt(horizonEl.value, 10);
+  const discount = parseNumber(discountEl.value);
+
+  if (price === null || horizon <= 0 || discount === null) {
+    setScenarioStatus(
+      "Please provide a valid grain price, time horizon, and discount rate before applying."
+    );
+    return;
+  }
+
+  state.scenario.pricePerTonne = price;
+  state.scenario.timeHorizon = horizon;
+  state.scenario.discountRate = discount;
+
+  if (controlEl && controlEl.value) {
+    state.controlName = controlEl.value;
+  }
+
+  aggregateTreatments();
+  computeCBA();
+  renderAll();
+  setScenarioStatus("Scenario updated.");
+  showToast("Scenario settings applied.", "success");
+}
+
+function onControlTreatmentChange() {
+  const controlEl = document.getElementById("controlTreatment");
+  if (!controlEl || !controlEl.value) return;
+  state.controlName = controlEl.value;
+  aggregateTreatments();
+  computeCBA();
+  renderAll();
+  setScenarioStatus(`Control changed to ${state.controlName}.`);
+}
+
+function describeDataQuality(rows) {
+  const total = rows.length;
+  const numericYield = rows.filter((r) => r.yield_t_ha !== null).length;
+  const numericCost = rows.filter((r) => r.total_cost_per_ha !== null).length;
+
+  const parts = [];
+  parts.push(`${total} data rows loaded.`);
+
+  if (numericYield === total && numericCost === total) {
+    parts.push("All rows have numeric yield and total cost values.");
+  } else {
+    parts.push(
+      `${numericYield} rows have usable yield values and ${numericCost} rows have usable total cost values.`
+    );
+    parts.push(
+      "The analysis uses all rows with valid numbers and ignores missing or non-numeric entries in optional columns."
+    );
+  }
+
+  return parts.join(" ");
+}
+
+function commitParsedData(header, rows, preview) {
+  const { headerMap, normRows } = normaliseRows(header, rows);
+  const prepared = [];
+  normRows.forEach((row) => {
+    const treatmentName =
+      headerMap.treatment_name !== undefined
+        ? String(row[header[headerMap.treatment_name]] || "").trim()
+        : "";
+    const isControl =
+      headerMap.is_control !== undefined
+        ? interpretControlFlag(row[header[headerMap.is_control]])
+        : false;
+
+    const yieldValue =
+      headerMap.yield_t_ha !== undefined
+        ? parseNumber(row[header[headerMap.yield_t_ha]])
+        : null;
+
+    const totalCost =
+      headerMap.total_cost_per_ha !== undefined
+        ? parseNumber(row[header[headerMap.total_cost_per_ha]])
+        : null;
+
+    const variableCost =
+      headerMap.variable_cost_per_ha !== undefined
+        ? parseNumber(row[header[headerMap.variable_cost_per_ha]])
+        : null;
+
+    const fixedCost =
+      headerMap.fixed_cost_per_ha !== undefined
+        ? parseNumber(row[header[headerMap.fixed_cost_per_ha]])
+        : null;
+
+    const capitalCost =
+      headerMap.capital_cost_per_ha !== undefined
+        ? parseNumber(row[header[headerMap.capital_cost_per_ha]])
+        : null;
+
+    const otherBenefit =
+      headerMap.other_benefit_per_ha !== undefined
+        ? parseNumber(row[header[headerMap.other_benefit_per_ha]])
+        : null;
+
+    prepared.push({
+      trial_id:
+        headerMap.trial_id !== undefined
+          ? String(row[header[headerMap.trial_id]] || "").trim()
+          : "",
+      treatment_name: treatmentName,
+      is_control: isControl,
+      yield_t_ha: yieldValue,
+      total_cost_per_ha: totalCost,
+      variable_cost_per_ha: variableCost,
+      fixed_cost_per_ha: fixedCost,
+      capital_cost_per_ha: capitalCost,
+      other_benefit_per_ha: otherBenefit
+    });
+  });
+
+  state.rawRows = prepared;
+  state.rows = prepared;
+
+  const treatments = Array.from(
+    new Set(prepared.filter((r) => r.treatment_name).map((r) => r.treatment_name))
+  ).sort();
+  state.treatments = treatments;
+
+  const controls = Array.from(
+    new Set(prepared.filter((r) => r.is_control).map((r) => r.treatment_name))
+  );
+  if (controls.length === 1) {
+    state.controlName = controls[0];
+  } else if (controls.length > 1) {
+    state.controlName = controls[0];
+  } else {
+    state.controlName = null;
+  }
+
+  aggregateTreatments();
+  computeCBA();
+  updateControlTreatmentOptions();
+  renderAll();
+
+  const qualityText = describeDataQuality(prepared);
+  const previewText = [];
+  previewText.push("<div class=\"upload-preview-info\">");
+  previewText.push(
+    preview.detectedControlName
+      ? `<strong>Control detected:</strong> ${preview.detectedControlName}.`
+      : "Control detected from is_control column."
+  );
+  if (preview.detectedTreatments && preview.detectedTreatments.length) {
+    previewText.push(
+      `<strong>Treatments detected:</strong> ${preview.detectedTreatments.join(", ")}.`
+    );
+  }
+  previewText.push(`<span>${qualityText}</span>`);
+  previewText.push("</div>");
+
+  setUploadPreview(previewText.join(""));
+  setUploadStatus("Data uploaded successfully. Next: review results.", false);
+  showToast("Data uploaded successfully. Next: review results.", "success");
+}
+
+function onFileSelected(file) {
+  if (!file) {
+    state.pendingFile = null;
+    setUploadStatus("No file selected.", true);
+    setUploadPreview("");
+    return;
+  }
+
+  state.pendingFile = file;
+  setUploadStatus(`Selected file: ${file.name}. Click “Check file” to validate.`, false);
+  setUploadPreview("");
+}
+
+function handleParsedFile(header, rows) {
+  const preview = validateParsedData(header, rows);
+  state.uploadPreview = preview;
+  renderDataPreview(preview);
+
+  if (!preview.errors.length && preview.canRun) {
+    setUploadStatus(
+      "File structure looks valid. You can now upload and use this data in the analysis.",
+      false
+    );
+  } else if (preview.errors.length) {
+    setUploadStatus(
+      "File has issues that must be fixed before the analysis can run. See details below.",
+      true
+    );
+  } else {
+    setUploadStatus(
+      "The file was read but some issues were detected. You may still be able to use it for a basic analysis.",
+      false
+    );
+  }
+}
+
+function onValidateSelectedFileClick() {
+  const file =
+    state.pendingFile ||
+    (document.getElementById("fileInput") &&
+      document.getElementById("fileInput").files &&
+      document.getElementById("fileInput").files[0]);
+
+  if (!file) {
+    setUploadStatus("Please choose a TSV, CSV, or Excel file before checking.", true);
+    showToast("No file selected.", "warning");
+    return;
+  }
+
+  const reader = new FileReader();
+  const extension = file.name.toLowerCase();
+
+  reader.onload = (event) => {
+    try {
+      let header;
+      let rows;
+      if (extension.endsWith(".xlsx")) {
+        const result = parseSpreadsheetFile(event.target.result);
+        header = result.header;
+        rows = result.rows;
       } else {
-        addCheck(
-          false,
-          `${purpose} column missing`,
-          `No column was found for ${purpose.toLowerCase()}. The tool will still run but some metrics may be incomplete.`,
-          "warn"
-        );
+        const text = event.target.result;
+        const delimiter = detectDelimiterFromName(file.name);
+        const parsed = parseDelimitedText(text, delimiter);
+        header = parsed.header;
+        rows = parsed.rows;
       }
-    };
-
-    addColCheck("Treatment name", cm.treatmentName);
-    addColCheck("Control flag", cm.isControl);
-    addColCheck("Replicate", cm.replicate);
-    addColCheck("Yield", cm.yield);
-    addColCheck("Variable cost", cm.variableCost);
-    addColCheck("Capital cost", cm.capitalCost);
-
-    const missingYieldRows = state.rows.filter((r) => {
-      if (!cm.yield) return false;
-      const v = r[cm.yield];
-      return v === null || v === undefined || String(v).trim() === "";
-    }).length;
-
-    if (missingYieldRows > 0) {
-      addCheck(
-        false,
-        "Missing yield values",
-        `${missingYieldRows} rows have missing yield; these rows still count for costs but are excluded from yield averages.`,
-        "warn"
+      handleParsedFile(header, rows);
+      showToast("File checked. Review the messages below.", "success");
+    } catch (err) {
+      console.error(err);
+      setUploadStatus(
+        "The file could not be read. Please ensure it is a valid TSV, CSV, or Excel file.",
+        true
       );
-    } else {
-      addCheck(
-        true,
-        "Yield values present",
-        "All rows have yield values in the detected yield column.",
-        "ok"
-      );
+      showToast("File could not be read.", "error");
     }
+  };
 
-    checksEl.innerHTML = "";
-    for (const c of checks) {
-      const li = document.createElement("li");
-      li.className = "check-item";
-      const pillClass =
-        c.severity === "err" ? "err" : c.severity === "warn" ? "warn" : "ok";
-      li.innerHTML = `
-        <span class="check-pill ${pillClass}">${c.ok ? "OK" : "Check"}</span>
-        <span>${c.label}. ${c.detail}</span>
-      `;
-      checksEl.appendChild(li);
-    }
+  if (extension.endsWith(".xlsx")) {
+    reader.readAsArrayBuffer(file);
+  } else {
+    reader.readAsText(file);
+  }
+}
+
+function onUploadSelectedFileClick() {
+  const file =
+    state.pendingFile ||
+    (document.getElementById("fileInput") &&
+      document.getElementById("fileInput").files &&
+      document.getElementById("fileInput").files[0]);
+
+  if (!file) {
+    setUploadStatus("Please choose a file and run “Check file” before uploading.", true);
+    showToast("No file selected.", "warning");
+    return;
   }
 
-  function getColumnHelpText(columnName) {
-    const key = String(columnName || "").trim();
-    const map = {
-      plot_id: "Unique identifier for each plot or observation (optional).",
-      replicate_id: "Replicate number or label for the same treatment (optional).",
-      treatment_name: "Name of the treatment for this row. Use the same name across replicates.",
-      is_control: "Set TRUE/1/yes for control rows, FALSE/0/no for treatment rows.",
-      yield_t_ha: "Outcome for the row (for example yield) expressed per hectare.",
-      total_cost_per_ha: "Total variable cost per hectare for this row.",
-      total_cost_per_ha_raw: "Raw total variable cost per hectare (optional).",
-      cost_amendment_input_per_ha: "One-off capital / upfront cost per hectare for this row (optional).",
-      amendment_name: "Alternative label for treatment name (optional).",
-      practice_change_label: "Short label describing the treatment (optional)."
-    };
-    return map[key] || "Optional column. Leave blank if not applicable.";
+  if (!state.uploadPreview) {
+    setUploadStatus(
+      "Please use “Check file” first so the tool can validate the structure before uploading.",
+      true
+    );
+    showToast("Please check the file before uploading.", "warning");
+    return;
   }
 
-  function renderTemplateColumns() {
-    const container = document.getElementById("templateColumns");
-    if (!container) return;
-    const headers = (state.templateHeaders && state.templateHeaders.length)
-      ? state.templateHeaders
-      : (state.headers && state.headers.length ? state.headers : []);
+  if (state.uploadPreview.errors && state.uploadPreview.errors.length) {
+    setUploadStatus(
+      "The file still has issues that must be fixed before the analysis can run. See the list below.",
+      true
+    );
+    showToast("Upload blocked due to structural issues.", "error");
+    return;
+  }
 
-    if (!headers.length) {
-      container.innerHTML = '<div class="small muted">Template columns will appear once a dataset is loaded.</div>';
-      return;
+  const reader = new FileReader();
+  const extension = file.name.toLowerCase();
+
+  reader.onload = (event) => {
+    try {
+      let header;
+      let rows;
+      if (extension.endsWith(".xlsx")) {
+        const result = parseSpreadsheetFile(event.target.result);
+        header = result.header;
+        rows = result.rows;
+      } else {
+        const text = event.target.result;
+        const delimiter = detectDelimiterFromName(file.name);
+        const parsed = parseDelimitedText(text, delimiter);
+        header = parsed.header;
+        rows = parsed.rows;
+      }
+      commitParsedData(header, rows, state.uploadPreview);
+    } catch (err) {
+      console.error(err);
+      setUploadStatus(
+        "An error occurred while processing the file for analysis. Please try again or check the format.",
+        true
+      );
+      showToast("An error occurred while uploading the data.", "error");
     }
+  };
 
-    const required = new Set(["treatment_name", "is_control", "yield_t_ha", "total_cost_per_ha"]);
+  if (extension.endsWith(".xlsx")) {
+    reader.readAsArrayBuffer(file);
+  } else {
+    reader.readAsText(file);
+  }
+}
 
-    const rows = headers.map((h) => {
-      const help = getColumnHelpText(h);
-      const req = required.has(h) ? "Required" : "Optional";
-      return `<tr><td class="col-name"><span class="tip" data-tooltip="${escapeHtml(help)}">${escapeHtml(h)}</span></td><td>${escapeHtml(help)}</td><td>${req}</td></tr>`;
+function onResetToolClick() {
+  loadDefaultDataset()
+    .then(() => {
+      showToast("Tool reset to built-in example dataset.", "success");
+      setUploadStatus("Reset to built-in example dataset.", false);
+      setUploadPreview("");
+      state.pendingFile = null;
+      state.uploadPreview = null;
+      const fileInput = document.getElementById("fileInput");
+      if (fileInput) {
+        fileInput.value = "";
+      }
+    })
+    .catch((err) => {
+      console.error(err);
+      showToast("Unable to reset to the built-in dataset.", "error");
+    });
+}
+
+async function loadDefaultDataset() {
+  const response = await fetch("faba_beans_trial_clean_named.tsv");
+  const text = await response.text();
+  const parsed = parseDelimitedText(text, "\t");
+  const header = parsed.header;
+  const rows = parsed.rows;
+
+  const preview = validateParsedData(header, rows);
+  state.uploadPreview = preview;
+  renderDataPreview(preview);
+
+  commitParsedData(header, rows, preview);
+
+  const priceEl = document.getElementById("pricePerTonne");
+  const horizonEl = document.getElementById("timeHorizon");
+  const discountEl = document.getElementById("discountRate");
+
+  if (priceEl) priceEl.value = state.scenario.pricePerTonne;
+  if (horizonEl) horizonEl.value = state.scenario.timeHorizon;
+  if (discountEl) discountEl.value = state.scenario.discountRate;
+
+  buildTemplateColumnsPanel(header.map((h) => normaliseHeader(h)));
+  await ensureTemplateHeaders();
+}
+
+async function ensureTemplateHeaders() {
+  if (state.templateHeaders && Array.isArray(state.templateHeaders)) {
+    return state.templateHeaders;
+  }
+  try {
+    const response = await fetch("faba_beans_trial_clean_named.tsv");
+    const text = await response.text();
+    const { header } = parseDelimitedText(text, "\t");
+    const headerMap = buildHeaderMap(header);
+
+    const desired = [];
+    CORE_COLUMNS.forEach((col) => {
+      if (Object.prototype.hasOwnProperty.call(headerMap, col)) {
+        desired.push(col);
+      }
+    });
+    OPTIONAL_COLUMNS.forEach((col) => {
+      if (Object.prototype.hasOwnProperty.call(headerMap, col)) {
+        desired.push(col);
+      }
     });
 
-    container.innerHTML = `
-      <table>
-        <thead>
-          <tr>
-            <th>Column</th>
-            <th>What to enter</th>
-            <th>Status</th>
-          </tr>
-        </thead>
-        <tbody>
-          ${rows.join("")}
-        </tbody>
-      </table>
-    `;
-  }
-
-  function renderControlChoice() {
-    const select = document.getElementById("controlChoice");
-    const help = document.getElementById("controlChoiceHelp");
-    if (!select) return;
-
-    select.innerHTML = "";
-
-    if (!state.treatments.length) {
-      if (help) help.textContent = "";
-      return;
-    }
-
-    const flagged = state.treatments.filter((t) => t.isControlFlagged).map((t) => t.name);
-    const flaggedSet = new Set(flagged);
-
-    const ordered = [];
-    // Put flagged control candidates first
-    for (const t of state.treatments) {
-      if (flaggedSet.has(t.name)) ordered.push(t);
-    }
-    for (const t of state.treatments) {
-      if (!flaggedSet.has(t.name)) ordered.push(t);
-    }
-
-    for (const t of ordered) {
-      const opt = document.createElement("option");
-      opt.value = t.name;
-      opt.textContent = flaggedSet.has(t.name) ? `${t.name} (marked as control)` : t.name;
-      if (t.name === state.controlName) opt.selected = true;
-      select.appendChild(opt);
-    }
-
-    if (help) {
-      if (flagged.length > 1) {
-        help.textContent = "Multiple treatments are marked as control. Select the reference control to use in the comparison.";
-      } else if (flagged.length === 1) {
-        help.textContent = "Reference control detected from the is_control column. You can change it if needed.";
-      } else {
-        help.textContent = "No control flag was detected. Select the reference control used for comparisons.";
+    const extras = [];
+    header.forEach((h) => {
+      const norm = normaliseHeader(h);
+      if (norm && !desired.includes(norm)) {
+        extras.push(norm);
       }
-    }
-  }
-
-  function renderLeaderboard() {
-    const card = document.getElementById("leaderboardCard");
-    const table = document.getElementById("leaderboardTable");
-
-    if (!card || !table) return;
-
-    const hasResults = state.results && state.results.rows && state.results.rows.length;
-    if (!hasResults) {
-      card.style.display = "none";
-      return;
-    }
-
-    card.style.display = "block";
-
-    const rows = state.results.rows.slice();
-    const basicOnly = !!state.results.basicOnly;
-
-    const controlName = state.controlName;
-    const nonControl = rows.filter((r) => r.name !== controlName);
-
-    const top = (() => {
-      if (!nonControl.length) return null;
-      if (basicOnly) {
-        return nonControl
-          .slice()
-          .sort((a, b) => {
-            const aVal = Number.isNaN(a.netAnnualValue) ? -Infinity : a.netAnnualValue;
-            const bVal = Number.isNaN(b.netAnnualValue) ? -Infinity : b.netAnnualValue;
-            return bVal - aVal;
-          })[0];
-      }
-      return nonControl
-        .slice()
-        .sort((a, b) => {
-          const aVal = Number.isNaN(a.npv) ? -Infinity : a.npv;
-          const bVal = Number.isNaN(b.npv) ? -Infinity : b.npv;
-          return bVal - aVal;
-        })[0];
-    })();
-
-    const header = basicOnly
-      ? `<h2>Indicative ranking</h2>
-         <p class="tab-intro">Based on average yield and average costs. Full discounted results require complete inputs.</p>`
-      : `<h2>Top ranked treatment</h2>
-         <p class="tab-intro">Based on discounted net profit per hectare relative to the selected control.</p>`;
-
-    const topHtml = (() => {
-      if (!top) return `<p class="muted">No treatment results are available.</p>`;
-
-      if (basicOnly) {
-        const net = Number.isNaN(top.netAnnualValue) ? "NA" : formatCurrency(top.netAnnualValue);
-        const delta = Number.isNaN(top.deltaNetAnnual) ? "NA" : formatCurrency(top.deltaNetAnnual);
-        return `
-          <div class="leaderboard-highlight">
-            <p><strong>${escapeHtml(top.name)}</strong> has the highest indicative net value (${net}), which is ${delta} relative to the control.</p>
-          </div>
-        `;
-      }
-
-      const npv = Number.isNaN(top.npv) ? "NA" : formatCurrency(top.npv);
-      const delta = Number.isNaN(top.deltaNpv) ? "NA" : formatCurrency(top.deltaNpv);
-      return `
-        <div class="leaderboard-highlight">
-          <p><strong>${escapeHtml(top.name)}</strong> has the highest net profit (${npv}), which is ${delta} relative to the control.</p>
-        </div>
-      `;
-    })();
-
-    const cols = basicOnly
-      ? ["Rank", "Treatment", "Yield mean (t/ha)", "Cost mean ($/ha)", "Net value (1 year)", "Change vs control"]
-      : ["Rank", "Treatment", "NPV ($/ha)", "Change vs control", "Change in costs", "BCR"];
-
-    const headerRow = `<tr>${cols.map((c) => `<th>${escapeHtml(c)}</th>`).join("")}</tr>`;
-
-    const bodyRows = rows
-      .filter((r) => r.name !== controlName)
-      .slice(0, 10)
-      .map((r) => {
-        if (basicOnly) {
-          const y = Number.isNaN(r.meanOutcome) ? "NA" : formatNumber(r.meanOutcome, 2);
-          const c = Number.isNaN(r.meanCost) ? "NA" : formatCurrency(r.meanCost);
-          const n = Number.isNaN(r.netAnnualValue) ? "NA" : formatCurrency(r.netAnnualValue);
-          const d = Number.isNaN(r.deltaNetAnnual) ? "NA" : formatCurrency(r.deltaNetAnnual);
-          return `<tr>
-            <td>${escapeHtml(String(r.rank))}</td>
-            <td>${escapeHtml(r.name)}</td>
-            <td>${escapeHtml(y)}</td>
-            <td>${escapeHtml(c)}</td>
-            <td>${escapeHtml(n)}</td>
-            <td>${escapeHtml(d)}</td>
-          </tr>`;
-        }
-
-        const npv = Number.isNaN(r.npv) ? "NA" : formatCurrency(r.npv);
-        const delta = Number.isNaN(r.deltaNpv) ? "NA" : formatCurrency(r.deltaNpv);
-        const costDelta = Number.isNaN(r.deltaPvCosts) ? "NA" : formatCurrency(r.deltaPvCosts);
-        const bcr = r.bcr == null || Number.isNaN(r.bcr) ? "NA" : r.bcr.toFixed(2);
-
-        return `<tr>
-          <td>${escapeHtml(String(r.rank))}</td>
-          <td>${escapeHtml(r.name)}</td>
-          <td>${escapeHtml(npv)}</td>
-          <td>${escapeHtml(delta)}</td>
-          <td>${escapeHtml(costDelta)}</td>
-          <td>${escapeHtml(bcr)}</td>
-        </tr>`;
-      })
-      .join("");
-
-    table.innerHTML = `
-      ${header}
-      ${topHtml}
-      <div class="table-wrap">
-        <table class="result-table">
-          <thead>${headerRow}</thead>
-          <tbody>${bodyRows || ""}</tbody>
-        </table>
-      </div>
-    `;
-  }
-
-  function renderComparisonTable() {
-    const table = document.getElementById("comparisonTable");
-    if (!table) return;
-
-    const basicNote = document.getElementById("basicAnalysisNote");
-    if (basicNote) {
-      if (state.results && state.results.basicOnly) {
-        basicNote.style.display = "inline";
-        basicNote.textContent = " Indicative summary shown because full discounted results could not be calculated from the available inputs.";
-      } else {
-        basicNote.style.display = "none";
-        basicNote.textContent = "";
-      }
-    }
-
-    table.innerHTML = "";
-
-    const { treatments } = state.results;
-    if (!treatments || !treatments.length) {
-      table.innerHTML =
-        '<tbody><tr><td class="small muted">No results yet. Load data and apply scenario settings.</td></tr></tbody>';
-      return;
-    }
-
-    const control = treatments.find((t) => t.isControl) || treatments[0];
-    const nonControl = treatments.filter((t) => !t.isControl);
-    const ordered = [control, ...nonControl];
-
-    const indicators = state.results.basicOnly ? [
-      { key: "meanOutcome", label: "Average yield (t/ha)" },
-      { key: "meanCost", label: "Average total cost ($/ha)" },
-      { key: "netAnnualValue", label: "Net value (one year, $/ha)" },
-      { key: "deltaNetAnnual", label: "Change vs control (one year, $/ha)" }
-    ] : [
-      { key: "pvBenefits", label: "Present value benefits ($/ha)" },
-      { key: "pvTotalCosts", label: "Present value costs ($/ha)" },
-      { key: "npv", label: "Net profit (NPV, $/ha)" },
-      { key: "deltaNpv", label: "Change in NPV vs control ($/ha)" },
-      { key: "deltaPvCosts", label: "Change in costs vs control ($/ha)" },
-      { key: "bcr", label: "Benefit cost ratio (BCR)" }
-    ];
-
-    const lines = [];
-    lines.push(headers.join(","));
-
-    for (const t of treatments) {
-      const row = [
-        `"${t.name.replace(/"/g, '""')}"`,
-        t.isControl ? "TRUE" : "FALSE",
-        Number.isNaN(t.avgYield) ? "" : t.avgYield.toFixed(4),
-        Number.isNaN(t.avgVarCost) ? "" : t.avgVarCost.toFixed(4),
-        Number.isNaN(t.avgCapCost) ? "" : t.avgCapCost.toFixed(4),
-        Number.isNaN(t.pvBenefits) ? "" : t.pvBenefits.toFixed(2),
-        Number.isNaN(t.pvTotalCosts) ? "" : t.pvTotalCosts.toFixed(2),
-        Number.isNaN(t.npv) ? "" : t.npv.toFixed(2),
-        Number.isNaN(t.bcr) ? "" : t.bcr.toFixed(4),
-        Number.isNaN(t.roi) ? "" : t.roi.toFixed(2),
-        t.rank,
-        Number.isNaN(t.deltaNpv) ? "" : t.deltaNpv.toFixed(2),
-        Number.isNaN(t.deltaPvCosts) ? "" : t.deltaPvCosts.toFixed(2)
-      ];
-      lines.push(row.join(","));
-    }
-
-    lines.push("#");
-    lines.push(`# Generated by ${PROJECT.name}`);
-    lines.push(`# ${PROJECT.partnerPlaceholder}`);
-
-    const blob = new Blob([lines.join("\n")], {
-      type: "text/csv;charset=utf-8;"
     });
-    downloadBlob(blob, "treatment_summary.csv");
-    showToast("Treatment summary (CSV) downloaded.", "success");
+
+    state.templateHeaders = [...desired, ...extras];
+  } catch (err) {
+    console.error(err);
+    state.templateHeaders = [...CORE_COLUMNS, ...OPTIONAL_COLUMNS];
   }
+  return state.templateHeaders;
+}
 
-  function exportComparisonCSV() {
-    const { treatments } = state.results;
-    if (!treatments || !treatments.length) {
-      showToast("No results table to export.", "error");
-      return;
-    }
+function buildTemplateRows(headers) {
+  const coreCols = headers.filter((h) => CORE_COLUMNS.includes(h));
+  const otherCols = headers.filter((h) => !CORE_COLUMNS.includes(h));
 
-    const indicators = [
-      { key: "pvBenefits", label: "Total benefits over time (discounted)" },
-      { key: "pvTotalCosts", label: "Total costs over time (discounted)" },
-      { key: "npv", label: "Net profit over time" },
-      { key: "bcr", label: "Benefit per dollar spent" },
-      { key: "roi", label: "Return on investment (percent)" },
-      { key: "rank", label: "Overall ranking" },
-      {
-        key: "deltaNpv",
-        label: "Difference in net profit compared with control"
-      },
-      {
-        key: "deltaPvCosts",
-        label: "Difference in total cost compared with control"
-      }
-    ];
+  const ordered = [...coreCols, ...otherCols];
 
-    const control = treatments.find((t) => t.isControl) || treatments[0];
-    const nonControl = treatments.filter((t) => !t.isControl);
-    const ordered = [control, ...nonControl];
-
-    const header = ["What is measured"];
-    for (const t of ordered) {
-      header.push(t.isControl ? "Control (baseline)" : t.name);
-    }
-
-    const lines = [];
-    lines.push(header.map(csvEscape).join(","));
-
-    for (const ind of indicators) {
-      const row = [ind.label];
-      for (const t of ordered) {
-        const r = treatments.find((x) => x.name === t.name);
-        let value = "";
-        if (ind.key === "pvBenefits") {
-          value = Number.isNaN(r.pvBenefits) ? "" : r.pvBenefits.toFixed(2);
-        } else if (ind.key === "pvTotalCosts") {
-          value = Number.isNaN(r.pvTotalCosts) ? "" : r.pvTotalCosts.toFixed(2);
-        } else if (ind.key === "npv") {
-          value = Number.isNaN(r.npv) ? "" : r.npv.toFixed(2);
-        } else if (ind.key === "bcr") {
-          value = Number.isNaN(r.bcr) ? "" : r.bcr.toFixed(4);
-        } else if (ind.key === "roi") {
-          value = Number.isNaN(r.roi) ? "" : r.roi.toFixed(2);
-        } else if (ind.key === "rank") {
-          value = r.rank;
-        } else if (ind.key === "deltaNpv") {
-          value = Number.isNaN(r.deltaNpv) ? "" : r.deltaNpv.toFixed(2);
-        } else if (ind.key === "deltaPvCosts") {
-          value = Number.isNaN(r.deltaPvCosts) ? "" : r.deltaPvCosts.toFixed(2);
-        }
-        row.push(value);
-      }
-      lines.push(row.map(csvEscape).join(","));
-    }
-
-    lines.push("#");
-    lines.push(`# Generated by ${PROJECT.name}`);
-    lines.push(`# ${PROJECT.partnerPlaceholder}`);
-
-    lines.push("#");
-    lines.push(`# Generated by ${PROJECT.name}`);
-    lines.push(`# ${PROJECT.partnerPlaceholder}`);
-
-    const blob = new Blob([lines.join("\n")], {
-      type: "text/csv;charset=utf-8;"
+  const rows = [];
+  for (let i = 0; i < 5; i += 1) {
+    const row = {};
+    ordered.forEach((h) => {
+      row[h] = "";
     });
-    downloadBlob(blob, "comparison_to_control.csv");
-    showToast("Comparison-to-control results (CSV) downloaded.", "success");
+    rows.push(row);
   }
 
-  function csvEscape(value) {
-    if (value === null || value === undefined) return "";
-    const s = String(value);
-    if (s.includes(",") || s.includes('"') || s.includes("\n")) {
-      return `"${s.replace(/"/g, '""')}"`;
-    }
-    return s;
+  if (rows.length) {
+    rows[0].is_control = "1";
+    rows[0].treatment_name = "Control";
   }
 
-  function downloadBlob(blob, filename) {
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = filename;
-    document.body.appendChild(a);
-    a.click();
-    setTimeout(() => {
-      document.body.removeChild(a);
-      URL.revokeObjectURL(url);
-    }, 0);
+  return { header: ordered, rows };
+}
+
+async function downloadTemplateTSV() {
+  const headers = await ensureTemplateHeaders();
+  const { header, rows } = buildTemplateRows(headers);
+
+  const lines = [];
+  lines.push(header.join("\t"));
+  rows.forEach((row) => {
+    const line = header.map((h) => (row[h] !== undefined ? row[h] : "")).join("\t");
+    lines.push(line);
+  });
+
+  const blob = new Blob([lines.join("\n")], { type: "text/tab-separated-values" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = "trial_cost_benefit_template.tsv";
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
+
+async function downloadTemplateXLSX() {
+  const headers = await ensureTemplateHeaders();
+  const { header, rows } = buildTemplateRows(headers);
+
+  const aoa = [];
+  aoa.push(header);
+  rows.forEach((row) => {
+    const line = header.map((h) => (row[h] !== undefined ? row[h] : ""));
+    aoa.push(line);
+  });
+
+  const ws = XLSX.utils.aoa_to_sheet(aoa);
+  const wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, "Template");
+  XLSX.writeFile(wb, "trial_cost_benefit_template.xlsx");
+}
+
+function buildWordParagraph(text) {
+  return `<p>${text}</p>`;
+}
+
+function buildWordHeading(text, level) {
+  const tag = level === 1 ? "h1" : level === 2 ? "h2" : "h3";
+  return `<${tag}>${text}</${tag}>`;
+}
+
+function buildWordTable(headers, rows) {
+  const thead = `<tr>${headers.map((h) => `<th>${h}</th>`).join("")}</tr>`;
+  const tbody = rows
+    .map((row) => `<tr>${row.map((cell) => `<td>${cell}</td>`).join("")}</tr>`)
+    .join("");
+  return `<table>${thead}${tbody}</table>`;
+}
+
+function buildResultsSummaryForWord() {
+  if (!state.cbaResults.length || !state.controlName) {
+    return buildWordParagraph(
+      "Results are not available because no dataset is loaded or no control treatment has been selected."
+    );
   }
 
-  function exportWorkbook() {
-    if (!window.XLSX) {
-      showToast("Excel library not available.", "error");
-      return;
-    }
-    if (!state.headers.length || !state.rows.length) {
-      showToast("No dataset loaded for workbook export.", "error");
-      return;
-    }
-    const wb = XLSX.utils.book_new();
+  const control = state.cbaResults.find((r) => r.is_control);
+  const treatments = state.cbaResults.filter((r) => !r.is_control);
+  const rows = [];
 
-    // Attribution sheet (kept minimal so it appears clearly in exports)
-    const attributionAoA = [
-      [PROJECT.name],
-      [PROJECT.partnerPlaceholder],
-      [""],
-      ["Note"],
-      [
-        "Treatments may appear in multiple rows (replicates). The tool aggregates rows by treatment and compares the average treatment with the average control."
-      ]
-    ];
-    XLSX.utils.book_append_sheet(wb, XLSX.utils.aoa_to_sheet(attributionAoA), "Attribution");
+  treatments.forEach((t) => {
+    const npvDiff =
+      t.npv_per_ha !== null && control.npv_per_ha !== null
+        ? t.npv_per_ha - control.npv_per_ha
+        : null;
+    const netDiff =
+      t.net_annual_per_ha !== null && control.net_annual_per_ha !== null
+        ? t.net_annual_per_ha - control.net_annual_per_ha
+        : null;
+    rows.push([
+      t.treatment_name,
+      formatCurrency(t.npv_per_ha, 0),
+      formatCurrency(control.npv_per_ha, 0),
+      npvDiff !== null ? formatCurrency(npvDiff, 0) : "",
+      t.bcr !== null && control.bcr !== null
+        ? (t.bcr - control.bcr >= 0 ? `+${(t.bcr - control.bcr).toFixed(2)}` : (t.bcr - control.bcr).toFixed(2))
+        : "",
+      formatCurrency(t.net_annual_per_ha, 0),
+      netDiff !== null ? formatCurrency(netDiff, 0) : ""
+    ]);
+  });
 
-    // Sheet 1: Cleaned dataset
-    const dataSheetAoA = [state.headers.slice()];
-    for (const row of state.rows) {
-      dataSheetAoA.push(
-        state.headers.map((h) =>
-          row[h] === undefined || row[h] === null ? "" : row[h]
-        )
-      );
-    }
-    const wsData = XLSX.utils.aoa_to_sheet(dataSheetAoA);
-    XLSX.utils.book_append_sheet(wb, wsData, "Dataset");
+  const headers = [
+    "Treatment",
+    "NPV ($/ha)",
+    "Control NPV ($/ha)",
+    "Difference in NPV",
+    "Difference in BCR",
+    "Net return ($/ha/year)",
+    "Difference in net return"
+  ];
 
-    // Sheet 2: Treatment summary
-    const { treatments } = state.results;
-    if (treatments && treatments.length) {
-      const summaryAoA = [
-        [
-          "Treatment name",
-          "Is control",
-          "Average yield (t per ha)",
-          "Average variable cost (per ha)",
-          "Average capital cost (per ha)",
-          "Total benefits over time (discounted)",
-          "Total costs over time (discounted)",
-          "Net profit over time",
-          "Benefit per dollar spent",
-          "Return on investment (percent)",
-          "Rank",
-          "Difference in net profit vs control",
-          "Difference in total cost vs control"
-        ]
-      ];
+  return buildWordTable(headers, rows);
+}
 
-      for (const t of treatments) {
-        summaryAoA.push([
-          t.name,
-          t.isControl ? "TRUE" : "FALSE",
-          Number.isNaN(t.avgYield) ? "" : t.avgYield,
-          Number.isNaN(t.avgVarCost) ? "" : t.avgVarCost,
-          Number.isNaN(t.avgCapCost) ? "" : t.avgCapCost,
-          Number.isNaN(t.pvBenefits) ? "" : t.pvBenefits,
-          Number.isNaN(t.pvTotalCosts) ? "" : t.pvTotalCosts,
-          Number.isNaN(t.npv) ? "" : t.npv,
-          Number.isNaN(t.bcr) ? "" : t.bcr,
-          Number.isNaN(t.roi) ? "" : t.roi,
-          t.rank,
-          Number.isNaN(t.deltaNpv) ? "" : t.deltaNpv,
-          Number.isNaN(t.deltaPvCosts) ? "" : t.deltaPvCosts
-        ]);
-      }
-
-      const wsSummary = XLSX.utils.aoa_to_sheet(summaryAoA);
-      XLSX.utils.book_append_sheet(wb, wsSummary, "Treatment summary");
-    }
-
-    // Sheet 3: Comparison to control
-    const compAoA = [];
-    const indicators = [
-      { key: "pvBenefits", label: "Total benefits over time (discounted)" },
-      { key: "pvTotalCosts", label: "Total costs over time (discounted)" },
-      { key: "npv", label: "Net profit over time" },
-      { key: "bcr", label: "Benefit per dollar spent" },
-      { key: "roi", label: "Return on investment (percent)" },
-      { key: "rank", label: "Overall ranking" },
-      {
-        key: "deltaNpv",
-        label: "Difference in net profit compared with control"
-      },
-      {
-        key: "deltaPvCosts",
-        label: "Difference in total cost compared with control"
-      }
-    ];
-
-    if (treatments && treatments.length) {
-      const control = treatments.find((t) => t.isControl) || treatments[0];
-      const nonControl = treatments.filter((t) => !t.isControl);
-      const ordered = [control, ...nonControl];
-
-      const headerRow = ["What is measured"];
-      for (const t of ordered) {
-        headerRow.push(t.isControl ? "Control (baseline)" : t.name);
-      }
-      compAoA.push(headerRow);
-
-      for (const ind of indicators) {
-        const row = [ind.label];
-        for (const t of ordered) {
-          const r = treatments.find((x) => x.name === t.name);
-          let v = "";
-          if (ind.key === "pvBenefits") v = r.pvBenefits;
-          else if (ind.key === "pvTotalCosts") v = r.pvTotalCosts;
-          else if (ind.key === "npv") v = r.npv;
-          else if (ind.key === "bcr") v = r.bcr;
-          else if (ind.key === "roi") v = r.roi;
-          else if (ind.key === "rank") v = r.rank;
-          else if (ind.key === "deltaNpv") v = r.deltaNpv;
-          else if (ind.key === "deltaPvCosts") v = r.deltaPvCosts;
-          row.push(v);
-        }
-        compAoA.push(row);
-      }
-
-      const wsComp = XLSX.utils.aoa_to_sheet(compAoA);
-      XLSX.utils.book_append_sheet(wb, wsComp, "Comparison to control");
-    }
-
-    // Sheet 4: Attribution
-    const now = new Date();
-    const attrAoA = [
-      ["Project", PROJECT.name],
-      ["Partners", PROJECT.partnerPlaceholder],
-      ["Generated", now.toISOString()],
-      [
-        "Note",
-        "Treatments with multiple rows (replicates) are aggregated and compared as average treatment vs average control."
-      ]
-    ];
-    const wsAttr = XLSX.utils.aoa_to_sheet(attrAoA);
-    XLSX.utils.book_append_sheet(wb, wsAttr, "Attribution");
-
-    XLSX.writeFile(wb, "cba_results.xlsx");
-    showToast("Excel workbook downloaded.", "success");
+function buildReplicateSummaryForWord() {
+  if (!state.aggregates.length) {
+    return buildWordParagraph("No replicate-level summary is available yet.");
   }
 
+  const rows = state.aggregates
+    .map((a) => [
+      a.treatment_name,
+      a.n_plots,
+      formatNumber(a.avg_yield_t_ha, 2),
+      formatCurrency(a.avg_total_cost_per_ha, 0)
+    ])
+    .sort((a, b) => String(a[0]).localeCompare(String(b[0])));
 
-  function exportCleanDatasetXLSX() {
-    if (!window.XLSX) {
-      showToast("Excel library not available.", "error");
-      return;
-    }
-    const headers = (state.cleanedHeaders && state.cleanedHeaders.length) ? state.cleanedHeaders : state.headers;
-    const rows = (state.cleanedRows && state.cleanedRows.length) ? state.cleanedRows : state.rows;
+  const headers = ["Treatment", "Number of plots", "Average yield (t/ha)", "Average total cost ($/ha)"];
 
-    if (!headers.length || !rows.length) {
-      showToast("No dataset to export.", "error");
-      return;
-    }
+  return buildWordTable(headers, rows);
+}
 
-    const wb = XLSX.utils.book_new();
-    const aoa = [headers.slice()];
-    for (const r of rows) {
-      aoa.push(headers.map((h) => (r[h] == null ? "" : r[h])));
-    }
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    XLSX.utils.book_append_sheet(wb, ws, "Cleaned data");
+function buildTechnicalSummaryForWord() {
+  const s = state.scenario;
+  const lines = [];
 
-    const meta = [
-      ["Upload timestamp", state.audit.uploadedAt || ""],
-      ["File name", state.audit.fileName || ""],
-      ["Rows", String(state.audit.rowCount || rows.length)],
-      ["Treatments", String(state.audit.treatmentCount || "")],
-      ["Tool version", state.audit.version || VERSION]
-    ];
-    const wsMeta = XLSX.utils.aoa_to_sheet(meta);
-    XLSX.utils.book_append_sheet(wb, wsMeta, "Audit");
-
-    XLSX.writeFile(wb, "cleaned_dataset.xlsx");
-    showToast("Cleaned dataset downloaded.", "success");
+  lines.push(
+    `The analysis compares a control treatment with alternative treatments using a trial dataset with one row per plot or replicate.`
+  );
+  lines.push(
+    `The current scenario assumes a grain price of $${formatNumber(
+      s.pricePerTonne,
+      0
+    )} per tonne, a time horizon of ${s.timeHorizon} years, and a discount rate of ${formatNumber(
+      s.discountRate,
+      1
+    )}% per year.`
+  );
+  lines.push(
+    `For each treatment, the tool calculates an average yield per hectare and an average total cost per hectare across all plots. These averages are used to compute net annual returns, net present value (NPV), benefit-cost ratio (BCR), and payback period where the data allow.`
+  );
+  if (state.basicAnalysisOnly) {
+    lines.push(
+      "In this scenario, some information required for full discounted analysis is missing. The tool therefore reports treatment means and simple differences relative to the control as indicative results."
+    );
   }
 
-  function exportWordReport() {
-    if (!state.treatments || !state.treatments.length) {
-      showToast("Run an analysis first.", "error");
-      return;
-    }
+  return lines.map((l) => buildWordParagraph(l)).join("");
+}
 
-    const title = escapeHtml(PROJECT.name || "Cost benefit analysis report");
-    const now = new Date();
-    const uploadedAt = state.audit.uploadedAt || now.toISOString();
-    const fileName = state.audit.fileName || "Uploaded dataset";
+function buildExportHeader() {
+  const s = state.scenario;
+  const controlName = state.controlName || "not yet selected";
 
-    const controlName = state.controlName || "";
-    const treatments = state.treatments.slice().sort((a, b) => (b.npv || 0) - (a.npv || 0));
-    const nonControl = treatments.filter((t) => t.name !== controlName);
-    const headline = nonControl.length ? nonControl[0] : null;
+  const parts = [];
+  parts.push(buildWordHeading(PROJECT.name, 1));
+  parts.push(
+    buildWordParagraph(
+      `Project partners: ${PROJECT.partnerPlaceholder}.`
+    )
+  );
+  parts.push(
+    buildWordParagraph(
+      `Scenario: price $${formatNumber(s.pricePerTonne, 0)} per tonne; time horizon ${s.timeHorizon} years; discount rate ${formatNumber(
+        s.discountRate,
+        1
+      )}% per year; control treatment: ${controlName}.`
+    )
+  );
 
-    const assumptionsHtml = buildAssumptionsHtml(true);
-    const auditHtml = `
-      <table class="mini">
-        <tr><th>Upload timestamp</th><td>${escapeHtml(uploadedAt)}</td></tr>
-        <tr><th>File name</th><td>${escapeHtml(fileName)}</td></tr>
-        <tr><th>Rows</th><td>${escapeHtml(String(state.audit.rowCount || 0))}</td></tr>
-        <tr><th>Treatments</th><td>${escapeHtml(String(state.audit.treatmentCount || 0))}</td></tr>
-        <tr><th>Reference control</th><td>${escapeHtml(controlName || "Not set")}</td></tr>
-        <tr><th>Tool version</th><td>${escapeHtml(state.audit.version || VERSION)}</td></tr>
-      </table>
-    `;
+  return parts.join("");
+}
 
-    const execSummary = (() => {
-      if (!headline) return `<p>No treatment results are available.</p>`;
-      const delta = formatCurrency(headline.deltaNpv);
-      const npv = formatCurrency(headline.npv);
-      const costDelta = formatCurrency(headline.deltaPvCosts);
-      const bcr = (headline.bcr == null || Number.isNaN(headline.bcr)) ? "NA" : headline.bcr.toFixed(2);
-      return `
-        <p><strong>Headline result:</strong> ${escapeHtml(headline.name)} ranks first on discounted net profit per hectare (${npv}), which is ${delta} relative to the control.</p>
-        <p><strong>Cost change relative to control:</strong> ${costDelta}. <strong>Benefit cost ratio:</strong> ${escapeHtml(bcr)}.</p>
-      `;
-    })();
+function buildExportFooterNote() {
+  return buildWordParagraph(
+    "These figures are generated automatically from the uploaded trial dataset using the Trial Cost-Benefit Decision Aid. If the dataset or assumptions change, the results in this document will also change when the export is refreshed."
+  );
+}
 
-    const rankingRows = nonControl.slice(0, 10).map((t, i) => `
-      <tr>
-        <td>${i + 1}</td>
-        <td>${escapeHtml(t.name)}</td>
-        <td>${escapeHtml(formatCurrency(t.npv))}</td>
-        <td>${escapeHtml(formatCurrency(t.deltaNpv))}</td>
-        <td>${escapeHtml(formatCurrency(t.deltaPvCosts))}</td>
-        <td>${escapeHtml((t.bcr == null || Number.isNaN(t.bcr)) ? "NA" : t.bcr.toFixed(2))}</td>
-      </tr>
-    `).join("");
-
-    const rankingTable = `
-      <table class="report-table">
-        <thead>
-          <tr>
-            <th>Rank</th>
-            <th>Treatment</th>
-            <th>Net profit (NPV)</th>
-            <th>Change vs control</th>
-            <th>Change in costs vs control</th>
-            <th>BCR</th>
-          </tr>
-        </thead>
-        <tbody>${rankingRows}</tbody>
-      </table>
-    `;
-
-    const compTableHtml = document.getElementById("comparisonTable") ? document.getElementById("comparisonTable").outerHTML : "";
-
-    const chartNet = document.getElementById("chartNetProfitVsControl");
-    const chartCb = document.getElementById("chartCostsBenefits");
-    const netImg = chartNet && chartNet.toDataURL ? chartNet.toDataURL("image/png") : "";
-    const cbImg = chartCb && chartCb.toDataURL ? chartCb.toDataURL("image/png") : "";
-
-    const chartsHtml = `
-      <h2>Charts</h2>
-      ${netImg ? `<h3>Extra net profit compared with control</h3><img class="chart-img" src="${netImg}" alt="Extra net profit compared with control">` : ""}
-      ${cbImg ? `<h3>Total discounted costs and benefits</h3><img class="chart-img" src="${cbImg}" alt="Total discounted costs and benefits">` : ""}
-    `;
-
-    const footerHtml = `
-      <div class="report-footer">
-        <p><strong>${escapeHtml(PROJECT.name)}</strong></p>
-        <p>${escapeHtml(PROJECT.partnerPlaceholder)}</p>
-      </div>
-    `;
-
-    const html = `<!doctype html>
+function buildWordDocumentHtml(bodyContent) {
+  const html = `
+<!doctype html>
 <html>
 <head>
-<meta charset="utf-8">
-<title>${title}</title>
+<meta charset="utf-8" />
+<title>${PROJECT.name} - Export</title>
 <style>
-  body { font-family: Arial, Helvetica, sans-serif; color: #313131; line-height: 1.45; margin: 28px; }
-  h1 { font-size: 22px; margin: 0 0 8px; }
-  h2 { font-size: 16px; margin: 22px 0 8px; }
-  h3 { font-size: 13px; margin: 14px 0 6px; }
-  p { margin: 0 0 10px; }
-  .muted { color: #626262; }
-  .mini { border-collapse: collapse; width: 100%; margin: 8px 0 16px; }
-  .mini th, .mini td { border: 1px solid #d3d3d3; padding: 6px 8px; text-align: left; vertical-align: top; }
-  .mini th { background: #f5f5f5; width: 32%; }
-  .report-table { border-collapse: collapse; width: 100%; margin: 10px 0 16px; }
-  .report-table th, .report-table td { border: 1px solid #d3d3d3; padding: 6px 8px; text-align: left; vertical-align: top; }
-  .report-table th { background: #f5f5f5; }
-  .chart-img { max-width: 100%; height: auto; border: 1px solid #d3d3d3; padding: 6px; margin: 6px 0 14px; }
-  .report-footer { margin-top: 26px; border-top: 2px solid #d3d3d3; padding-top: 10px; }
+body { font-family: Arial, Helvetica, sans-serif; font-size: 11pt; color: #111827; }
+h1 { font-size: 18pt; margin-bottom: 4pt; }
+h2 { font-size: 14pt; margin-top: 14pt; margin-bottom: 4pt; }
+h3 { font-size: 12pt; margin-top: 12pt; margin-bottom: 4pt; }
+p { margin: 4pt 0; }
+table { border-collapse: collapse; width: 100%; margin: 6pt 0; }
+th, td { border: 1px solid #cbd5e1; padding: 4px 6px; font-size: 10pt; }
+th { background: #e5eff9; text-align: left; }
+.small { font-size: 9pt; color: #6b7280; }
+.footer { margin-top: 12pt; font-size: 9pt; color: #6b7280; border-top: 1px solid #e5e7eb; padding-top: 6pt; }
 </style>
 </head>
 <body>
-  <h1>${title}</h1>
-  <p class="muted">Reference control: ${escapeHtml(controlName || "Not set")}</p>
-
-  <h2>Executive summary</h2>
-  ${execSummary}
-
-  <h2>Top ranked treatments</h2>
-  ${rankingTable}
-
-  <h2>Assumptions used</h2>
-  ${assumptionsHtml}
-
-  <h2>Results audit trail</h2>
-  ${auditHtml}
-
-  <h2>Comparison to control</h2>
-  ${compTableHtml}
-
-  ${chartsHtml}
-
-  ${footerHtml}
+${bodyContent}
 </body>
-</html>`;
-
-    const blob = new Blob([html], { type: "application/msword;charset=utf-8;" });
-    downloadBlob(blob, "cba_report.doc");
-    showToast("Word report downloaded.", "success");
-  }
-
-  function buildTemplateRows(headers) {
-  // Blank rows only. Users can add as many rows as needed offline.
-  const blank = {};
-  for (const h of headers) blank[h] = "";
-  // Provide a few blank rows to make the template immediately editable in spreadsheet software.
-  return [ { ...blank }, { ...blank }, { ...blank } ];
+</html>
+`;
+  return html;
 }
 
+function triggerWordDownload(filename, htmlContent) {
+  const blob = new Blob([htmlContent], { type: "application/msword" });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  document.body.removeChild(a);
+  URL.revokeObjectURL(url);
+}
 
-  async function ensureTemplateHeaders() {
-    if (state.templateHeaders && state.templateHeaders.length) {
-      return state.templateHeaders;
-    }
-    // Use example dataset headers as the authoritative template if available
-    try {
-      const response = await fetch("faba_beans_trial_clean_named.tsv", {
-        cache: "no-cache"
-      });
-      if (!response.ok) throw new Error("Template headers could not be fetched.");
-      const text = await response.text();
-      const parsed = parseDelimitedText(text);
-      state.templateHeaders = normaliseTemplateHeaders(parsed.headers);
-      return state.templateHeaders;
-    } catch (e) {
-      // Fallback to minimum required fields
-      state.templateHeaders = [
-        "plot_id",
-        "replicate_id",
-        "treatment_name",
-        "is_control",
-        "yield_t_ha",
-        "total_cost_per_ha",
-        "cost_amendment_input_per_ha"
-      ];
-      return state.templateHeaders;
-    }
+function onExportWordReportClick() {
+  if (!state.cbaResults.length || !state.controlName) {
+    showToast("No results to export. Please upload data and run the analysis first.", "warning");
+    return;
   }
 
-  async function downloadTemplateTSV() {
-    const headers = await ensureTemplateHeaders();
-    const headerLine = headers.join("\t");
-    const rows = buildTemplateRows(headers);
-    const lines = [headerLine];
-    for (const row of rows) {
-      lines.push(headers.map((h) => (row[h] == null ? "" : String(row[h]))).join("\t"));
-    }
-    const blob = new Blob([lines.join("\n")], {
-      type: "text/tab-separated-values;charset=utf-8;"
-    });
-    downloadBlob(blob, "trial_data_template.tsv");
-    showToast("Template downloaded.", "success");
+  const header = buildExportHeader();
+  const mainSummaryHeading = buildWordHeading("Summary of results", 2);
+  const mainSummaryTable = buildResultsSummaryForWord();
+  const replicateHeading = buildWordHeading("Replicate-level summary", 2);
+  const replicateTable = buildReplicateSummaryForWord();
+  const technicalHeading = buildWordHeading("How these numbers were calculated", 2);
+  const technicalBody = buildTechnicalSummaryForWord();
+  const footerNote = `<div class="footer">${buildExportFooterNote()}</div>`;
+
+  const body = [
+    header,
+    mainSummaryHeading,
+    mainSummaryTable,
+    replicateHeading,
+    replicateTable,
+    technicalHeading,
+    technicalBody,
+    footerNote
+  ].join("");
+
+  const html = buildWordDocumentHtml(body);
+  triggerWordDownload("trial_cost_benefit_results.doc", html);
+  const statusEl = document.getElementById("exportStatus");
+  if (statusEl) {
+    statusEl.textContent = "Results summary exported as Word document.";
+  }
+  showToast("Results summary exported.", "success");
+}
+
+function onExportWordTechnicalClick() {
+  const header = buildExportHeader();
+  const technicalHeading = buildWordHeading("Technical appendix", 2);
+  const technicalBody = buildTechnicalSummaryForWord();
+  const footerNote = `<div class="footer">${buildExportFooterNote()}</div>`;
+
+  const body = [header, technicalHeading, technicalBody, footerNote].join("");
+
+  const html = buildWordDocumentHtml(body);
+  triggerWordDownload("trial_cost_benefit_technical_appendix.doc", html);
+  const statusEl = document.getElementById("exportStatus");
+  if (statusEl) {
+    statusEl.textContent = "Technical appendix exported as Word document.";
+  }
+  showToast("Technical appendix exported.", "success");
+}
+
+function updateAIPrompt() {
+  const textarea = document.getElementById("aiPrompt");
+  if (!textarea) return;
+
+  if (!state.cbaResults.length || !state.controlName) {
+    textarea.value =
+      "No scenario is currently loaded. Upload a dataset, set the scenario parameters, and then refresh this prompt.";
+    return;
   }
 
-  async function downloadTemplateXLSX() {
-    if (!window.XLSX) {
-      showToast("Excel library not available.", "error");
-      return;
-    }
-    const headers = await ensureTemplateHeaders();
-    const wb = XLSX.utils.book_new();
-    const rows = buildTemplateRows(headers);
-    const aoa = [headers.slice()];
-    for (const r of rows) aoa.push(headers.map((h) => (r[h] == null ? "" : r[h])));
-    const ws = XLSX.utils.aoa_to_sheet(aoa);
-    XLSX.utils.book_append_sheet(wb, ws, "Template");
-    const wsInfo = XLSX.utils.aoa_to_sheet([
-      ["How to use"],
-      ["Fill one row per plot/replicate."],
-      ["Mark control rows with is_control = TRUE/1/yes."],
-      ["Provide numeric yield_t_ha and total_cost_per_ha for at least some rows."],
-      ["Optional columns may be left blank."]
-    ]);
-    XLSX.utils.book_append_sheet(wb, wsInfo, "Instructions");
-    XLSX.writeFile(wb, "trial_data_template.xlsx");
-    showToast("Template downloaded.", "success");
+  const s = state.scenario;
+  const control = state.cbaResults.find((r) => r.is_control);
+  const treatments = state.cbaResults.filter((r) => !r.is_control);
+
+  const lines = [];
+
+  lines.push(
+    "You are an agricultural economist preparing a short, plain-language summary of a replicated trial comparing a control treatment with alternative treatments."
+  );
+  lines.push("");
+  lines.push(`Project: ${PROJECT.name}.`);
+  lines.push(
+    `Scenario assumptions: grain price $${formatNumber(
+      s.pricePerTonne,
+      0
+    )} per tonne; time horizon ${s.timeHorizon} years; discount rate ${formatNumber(
+      s.discountRate,
+      1
+    )}% per year.`
+  );
+  lines.push(`Control treatment: ${state.controlName}.`);
+  lines.push("");
+
+  lines.push("For each treatment, you are given net present value (NPV), benefit-cost ratio (BCR), payback period, and net annual return per hectare, all calculated relative to the control.");
+  if (state.basicAnalysisOnly) {
+    lines.push(
+      "In this scenario, some information required for full discounted analysis is missing. Treat the figures as indicative rather than definitive."
+    );
+  }
+  lines.push("");
+
+  lines.push("Here are the results for each treatment (including the control):");
+  lines.push("");
+
+  const header = [
+    "treatment_name",
+    "is_control",
+    "npv_per_ha",
+    "bcr",
+    "payback_years",
+    "net_annual_per_ha",
+    "avg_yield_t_ha",
+    "avg_total_cost_per_ha",
+    "n_plots"
+  ];
+  lines.push(header.join("\t"));
+  state.cbaResults.forEach((r) => {
+    lines.push(
+      [
+        r.treatment_name,
+        r.is_control ? "control" : "treatment",
+        r.npv_per_ha !== null ? Math.round(r.npv_per_ha) : "",
+        r.bcr !== null ? r.bcr.toFixed(2) : "",
+        r.payback_years !== null && Number.isFinite(r.payback_years)
+          ? r.payback_years.toFixed(1)
+          : "",
+        r.net_annual_per_ha !== null ? Math.round(r.net_annual_per_ha) : "",
+        r.avg_yield_t_ha !== null ? r.avg_yield_t_ha.toFixed(2) : "",
+        r.avg_total_cost_per_ha !== null ? Math.round(r.avg_total_cost_per_ha) : "",
+        r.n_plots
+      ].join("\t")
+    );
+  });
+
+  lines.push("");
+  lines.push(
+    "Please write a concise, non-technical summary (2–4 short paragraphs) that explains which treatments look most economically attractive, how large the gains or losses are per hectare, and how sensitive these conclusions might be to the price and discount rate assumptions. Avoid equations and avoid giving specific methodological details unless needed for clarity."
+  );
+
+  textarea.value = lines.join("\n");
+}
+
+function copyAIPromptToClipboard() {
+  const textarea = document.getElementById("aiPrompt");
+  if (!textarea) return;
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  const ok = document.execCommand("copy");
+  if (ok) {
+    showToast("AI prompt copied to clipboard.", "success");
+  } else {
+    showToast("Unable to copy the prompt. Please copy it manually.", "warning");
+  }
+}
+
+function openAiAssistant(kind) {
+  const textarea = document.getElementById("aiPrompt");
+  if (!textarea) return;
+
+  textarea.select();
+  textarea.setSelectionRange(0, textarea.value.length);
+  document.execCommand("copy");
+
+  let url = "";
+  if (kind === "chatgpt") {
+    url = "https://chat.openai.com/";
+  } else if (kind === "copilot") {
+    url = "https://copilot.microsoft.com/";
   }
 
-  // =========================
-  // 6) DATA LOAD & COMMIT
-  // =========================
-
-  async function loadDefaultDataset() {
-    try {
-      const response = await fetch("faba_beans_trial_clean_named.tsv", {
-        cache: "no-cache"
-      });
-      if (!response.ok) {
-        throw new Error("Default dataset could not be fetched.");
-      }
-      const text = await response.text();
-      commitParsedData(text, "Example dataset loaded. You can upload your own data at any time.");
-      setUploadStatus("Example dataset loaded. You can upload your own data at any time.", "info");
-    } catch (err) {
-      console.error(err);
-      showToast(
-        "Could not load default dataset. You can still upload or paste data.",
-        "error"
-      );
-    }
+  if (url) {
+    window.open(url, "_blank", "noopener");
+    showToast("Prompt copied. Paste it into the new chat window.", "success");
+  } else {
+    showToast("Unsupported assistant. Copy the prompt manually.", "warning");
   }
+}
 
-  function buildCleanedDataset(parsed, templateHeaders, mapping) {
-    const originalHeaders = parsed.headers.slice();
-    const template = (templateHeaders && templateHeaders.length) ? templateHeaders.slice() : originalHeaders.slice();
-
-    const templateSet = new Set(template);
-    const extraHeaders = originalHeaders.filter((h) => !templateSet.has(h));
-
-    // Canonical-first headers: keep template order, then any extra columns from the file.
-    const cleanedHeaders = template.concat(extraHeaders);
-
-    const cleanedRows = parsed.rows.map((row) => {
-      const out = {};
-      // Template columns: pull from mapped columns or direct name match.
-      for (const h of template) {
-        // If this template header is one of the canonical columns, pull from mapping.
-        let sourceHeader = null;
-        if (h === "treatment_name") sourceHeader = mapping.treatment_name || null;
-        else if (h === "is_control") sourceHeader = mapping.is_control || null;
-        else if (h === "yield_t_ha") sourceHeader = mapping.yield_t_ha || null;
-        else if (h === "total_cost_per_ha") sourceHeader = mapping.total_cost_per_ha || null;
-        else if (h === "cost_amendment_input_per_ha") sourceHeader = mapping.cost_amendment_input_per_ha || null;
-        else sourceHeader = originalHeaders.includes(h) ? h : null;
-
-        out[h] = sourceHeader ? (row[sourceHeader] == null ? "" : row[sourceHeader]) : "";
-      }
-      // Extra columns: keep verbatim.
-      for (const h of extraHeaders) {
-        out[h] = row[h] == null ? "" : row[h];
-      }
-      return out;
-    });
-
-    return { cleanedHeaders, cleanedRows };
+function onRunAnalysisClick() {
+  if (!state.rows || !state.rows.length) {
+    showToast("Load or upload data first, then run the analysis.", "warning");
+    return;
   }
-
-  function renderDataPreview(preview) {
-    const panel = document.getElementById("dataPreviewPanel");
-    if (!panel) return;
-
-    if (!preview) {
-      panel.innerHTML = "";
-      return;
-    }
-
-    const { stats, errors, warnings, mapping, controlCandidates } = preview;
-
-    const issuesHtml = (() => {
-      const items = [];
-      for (const e of errors || []) {
-        items.push(`<li class="status error">${escapeHtml(e)}</li>`);
-      }
-      for (const w of warnings || []) {
-        items.push(`<li class="status warning">${escapeHtml(w)}</li>`);
-      }
-      if (!items.length) {
-        return `<p class="status success">Validation passed. You can upload and run the analysis.</p>`;
-      }
-      return `<ul class="issues-list">${items.join("")}</ul>`;
-    })();
-
-    const mappingRows = Object.keys(mapping || {}).map((k) => {
-      const v = mapping[k] || "(not found)";
-      return `<tr><th>${escapeHtml(k)}</th><td>${escapeHtml(v)}</td></tr>`;
-    }).join("");
-
-    const controlList = (controlCandidates && controlCandidates.length)
-      ? controlCandidates.map((c) => `<li>${escapeHtml(c)}</li>`).join("")
-      : "<li>None detected</li>";
-
-    panel.innerHTML = `
-      <h3>Preview your data</h3>
-      <div class="preview-grid">
-        <div class="preview-item"><div class="preview-label">Rows</div><div class="preview-value">${stats.rowCount}</div></div>
-        <div class="preview-item"><div class="preview-label">Columns</div><div class="preview-value">${stats.columnCount}</div></div>
-        <div class="preview-item"><div class="preview-label">Treatments</div><div class="preview-value">${stats.treatmentCount || "-"}</div></div>
-        <div class="preview-item"><div class="preview-label">Control rows</div><div class="preview-value">${stats.controlRowCount}</div></div>
-      </div>
-
-      <div class="field-group">
-        <p class="small muted">Column mapping used by the tool</p>
-        <table class="mini-table">
-          <tbody>${mappingRows}</tbody>
-        </table>
-      </div>
-
-      <div class="field-group">
-        <p class="small muted">Rows marked as control (by treatment name)</p>
-        <ul class="compact-list">${controlList}</ul>
-      </div>
-
-      <div class="field-group">
-        <p class="small muted">Issues and warnings</p>
-        ${issuesHtml}
-      </div>
-
-      <div class="field-group preview-actions" id="previewActions" style="display:${(errors && errors.length) ? "block" : "none"};">
-        <button id="btnDownloadHeaderTemplate" class="btn secondary" type="button">
-          Download template with your detected headers
-        </button>
-        <button id="btnDownloadCleanedNow" class="btn ghost" type="button">
-          Download cleaned data (TSV)
-        </button>
-      </div>
-    `;
-
-    const btnHdrTpl = document.getElementById("btnDownloadHeaderTemplate");
-    if (btnHdrTpl) {
-      btnHdrTpl.addEventListener("click", () => {
-        if (!state.lastPreview || !state.lastPreview.parsed) return;
-        downloadTemplateWithDetectedHeaders(state.lastPreview.parsed.headers);
-      });
-    }
-
-    const btnCleanNow = document.getElementById("btnDownloadCleanedNow");
-    if (btnCleanNow) {
-      btnCleanNow.addEventListener("click", () => {
-        exportCleanDatasetTSV();
-      });
-    }
-  }
-
-  function downloadTemplateWithDetectedHeaders(detectedHeaders) {
-    const baseHeaders = (detectedHeaders && detectedHeaders.length) ? detectedHeaders.slice() : [];
-    // Add canonical required headers if missing
-    const required = ["treatment_name", "is_control", "yield_t_ha", "total_cost_per_ha"];
-    const out = baseHeaders.slice();
-    for (const r of required) {
-      if (!out.includes(r)) out.push(r);
-    }
-    const line1 = out.join("\t");
-    const blankRow = out.map(() => "").join("\t");
-    const blob = new Blob([line1 + "\n" + blankRow + "\n"], { type: "text/tab-separated-values;charset=utf-8;" });
-    downloadBlob(blob, "template_with_detected_headers.tsv");
-    showToast("Template downloaded. Rename or add columns as needed.", "success");
-  }
-
-  function commitParsedData(text, meta) {
-    const parsed = parseDelimitedText(text);
-
-    // Keep template headers aligned with the authoritative dataset structure.
-    if (!state.templateHeaders || !state.templateHeaders.length) {
-      state.templateHeaders = normaliseTemplateHeaders(parsed.headers);
-    }
-
-    const preview = validateParsedData(parsed.headers, parsed.rows);
-    preview.parsed = parsed;
-    state.lastPreview = preview;
-    renderDataPreview(preview);
-
-    if (!preview.canRun) {
-      const msg = (preview.errors && preview.errors.length)
-        ? preview.errors[0]
-        : "File could not be loaded. Check required columns and minimum data requirements.";
-      showToast(msg, "error");
-      return { ok: false, message: msg, preview };
-    }
-
-    // Save audit trail
-    state.audit.fileName = meta && meta.fileName ? meta.fileName : "";
-    state.audit.uploadedAt = meta && meta.uploadedAt ? meta.uploadedAt : new Date().toISOString();
-    state.audit.rowCount = preview.stats.rowCount;
-    state.audit.treatmentCount = preview.stats.treatmentCount;
-    state.audit.controlCandidates = preview.controlCandidates || [];
-    state.audit.columnMapping = preview.mapping || {};
-    state.audit.version = VERSION;
-
-    // Store raw and parsed
-    state.rawText = text;
-    state.headers = parsed.headers;
-    state.rows = parsed.rows;
-
-    // Build cleaned dataset for export and transparency
-    const cleaned = buildCleanedDataset(parsed, state.templateHeaders, preview.mapping || {});
-    state.cleanedHeaders = cleaned.cleanedHeaders;
-    state.cleanedRows = cleaned.cleanedRows;
-
+  try {
     aggregateTreatments();
     computeCBA();
     renderAll();
-
-    
-    const btnRun = document.getElementById("btnRunAnalysis");
-    if (btnRun) btnRun.disabled = false;
-const detected = (() => {
-      const nRows = (state.rows && state.rows.length) ? state.rows.length : 0;
-      const nTreat = (state.treatments && state.treatments.length) ? state.treatments.length : 0;
-      const control = state.controlName ? `Control: ${state.controlName}` : "Control: not set";
-      return `${nRows} rows loaded; ${nTreat} treatments detected; ${control}.`;
-    })();
-
-    const successMessage = meta && meta.successMessage ? meta.successMessage : "Data uploaded successfully. Next: review results.";
-    const finalMsg = `${successMessage} ${detected}`;
-    showToast(finalMsg, "success");
-    return { ok: true, message: finalMsg, preview };
+    showToast("Analysis run successfully. Results updated.", "success");
+  } catch (err) {
+    console.error(err);
+    showToast("Something went wrong while running the analysis.", "error");
   }
+}
 
-  // =========================
-  // 7) UI WIRING
-  // =========================
-
-  function onTabClick(event) {
-    const button = event.currentTarget;
-    const tabId = button.getAttribute("data-tab");
-    if (!tabId) return;
-
-    document.querySelectorAll(".tab-button").forEach((btn) => {
-      btn.classList.toggle("active", btn === button);
+function attachEventListeners() {
+  const tabButtons = document.querySelectorAll(".tab");
+  tabButtons.forEach((btn) => {
+    btn.addEventListener("click", () => {
+      const tabName = btn.getAttribute("data-tab");
+      activateTab(tabName);
     });
-    document.querySelectorAll(".tab-panel").forEach((panel) => {
-      panel.classList.toggle("active", panel.id === tabId);
-    });
-  }
-
-  function onApplyScenario() {
-    const priceInput = document.getElementById("pricePerTonne");
-    const yearsInput = document.getElementById("years");
-    const persInput = document.getElementById("persistenceYears");
-    const discInput = document.getElementById("discountRate");
-    const controlSelect = document.getElementById("controlChoice");
-
-    if (priceInput) {
-      state.params.pricePerTonne = parseNumber(priceInput.value) || 0;
-    }
-    if (yearsInput) {
-      state.params.years = parseInt(yearsInput.value, 10) || 1;
-    }
-    if (persInput) {
-      state.params.persistenceYears =
-        parseInt(persInput.value, 10) || state.params.years;
-    }
-    if (discInput) {
-      state.params.discountRate = parseNumber(discInput.value) || 0;
-    }
-    if (controlSelect && controlSelect.value) {
-      state.controlName = controlSelect.value;
-    }
-
-    computeCBA();
-    renderAll();
-    showToast("Scenario settings updated.", "success");
-  }
-
-  function onFileInputChange(event) {
-    const file = event.target.files && event.target.files[0];
-    state.pendingFile = file || null;
-
-    if (!file) {
-      setUploadStatus("No file selected.", "warning");
-      renderDataPreview(null);
-      return;
-    }
-
-    setUploadStatus(`File selected: ${file.name}. Next: validate or upload.`, "info");
-    showToast("File selected. Validate or upload.", "info");
-
-    // Quick preview (non-blocking) using the first read
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const parsed = parseDelimitedText(String(e.target.result || ""));
-        const preview = validateParsedData(parsed.headers, parsed.rows);
-        preview.parsed = parsed;
-        state.lastPreview = preview;
-        renderDataPreview(preview);
-      } catch (err) {
-        console.error(err);
-        const msg = err && err.message ? err.message : "Could not read the selected file.";
-        setUploadStatus(msg, "error");
-        showToast(msg, "error");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  function onValidateSelectedFileClick() {
-    const file = state.pendingFile || (document.getElementById("fileInput") && document.getElementById("fileInput").files && document.getElementById("fileInput").files[0]);
-    if (!file) {
-      showToast("Select a file first.", "warning");
-      return;
-    }
-    setUploadStatus("Validating selected file locally.", "info");
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const parsed = parseDelimitedText(String(e.target.result || ""));
-        const preview = validateParsedData(parsed.headers, parsed.rows);
-        preview.parsed = parsed;
-        state.lastPreview = preview;
-        renderDataPreview(preview);
-
-        if (preview.canRun) {
-          setUploadStatus("Validation passed. You can upload and run the analysis.", "success");
-          showToast("Validation passed. Next: upload the file.", "success");
-        } else {
-          setUploadStatus("Validation found issues. See the preview panel for details.", "warning");
-          showToast("Validation found issues. See the preview panel.", "warning");
-        }
-      } catch (err) {
-        console.error(err);
-        const msg = err && err.message ? err.message : "Could not validate the selected file.";
-        setUploadStatus(msg, "error");
-        showToast(msg, "error");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  function onUploadSelectedFileClick() {
-    const file = state.pendingFile || (document.getElementById("fileInput") && document.getElementById("fileInput").files && document.getElementById("fileInput").files[0]);
-    if (!file) {
-      showToast("Select a file first.", "warning");
-      return;
-    }
-
-    setUploadStatus("Uploading and processing data.", "info");
-
-    const reader = new FileReader();
-    reader.onload = (e) => {
-      try {
-        const text = String(e.target.result || "");
-        const meta = {
-          fileName: file.name,
-          uploadedAt: new Date().toISOString(),
-          successMessage: "Data uploaded successfully. Next: review results."
-        };
-        const result = commitParsedData(text, meta);
-        if (result && result.ok) {
-          setUploadStatus(result.message, "success");
-        } else {
-          setUploadStatus(result.message || "Upload failed. See the preview panel for details.", "error");
-        }
-      } catch (err) {
-        console.error(err);
-        const msg = err && err.message ? err.message : "Upload failed.";
-        setUploadStatus(msg, "error");
-        showToast(msg, "error");
-      }
-    };
-    reader.readAsText(file);
-  }
-
-  function onResetToolClick() {
-    // Clear state while keeping parameters and template headers
-    state.rawText = "";
-    state.headers = [];
-    state.rows = [];
-    state.cleanedHeaders = [];
-    state.cleanedRows = [];
-    state.treatments = [];
-    state.controlName = null;
-    state.columnMap = null;
-    state.pendingFile = null;
-    state.lastPreview = null;
-    state.audit.fileName = "";
-    state.audit.uploadedAt = null;
-    state.audit.rowCount = 0;
-    state.audit.treatmentCount = 0;
-    state.audit.controlCandidates = [];
-    state.audit.columnMapping = {};
-    state.assumptions = {};
-
-    const fileInput = document.getElementById("fileInput");
-    if (fileInput) fileInput.value = "";
-
-    renderDataPreview(null);
-    renderAll();
-
-    // Return user to the first tab
-    const btn = document.querySelector('.tab-button[data-tab="overviewTab"]');
-    if (btn) btn.click();
-    setUploadStatus("Reset complete. Next: download the template or load your data.", "info");
-    showToast("Reset complete.", "success");
-  }
-
-  function onLoadPastedClick() {
-    const ta = document.getElementById("pasteInput");
-    if (!ta) return;
-    const text = ta.value;
-    if (!text || !text.trim()) {
-      showToast("Paste data before loading.", "error");
-      return;
-    }
-    try {
-      setUploadStatus("", "");
-      commitParsedData(text, "Data uploaded successfully. Next: review results.");
-      setUploadStatus("Data uploaded successfully. Next: run analysis and review results.", "success");
-    } catch (err) {
-      console.error(err);
-      const msg = err && err.message ? err.message : "Could not parse pasted data. Check its format.";
-      showToast(msg, "error");
-      setUploadStatus(msg, "error");
-    }
-  }
-
-  function onReloadDefaultClick() {
-    loadDefaultDataset();
-  }
-
-  function onLeaderboardFilterChange() {
-    renderLeaderboard();
-  }
-
-  function onCopyAiBriefing() {
-    const ta = document.getElementById("aiBriefing");
-    if (!ta) return;
-
-    const text = (ta.value || "").trim();
-    if (!text) {
-      showToast("No summary prompt is available yet. Run an analysis first.", "warning");
-      return;
-    }
-
-    // Prefer modern clipboard API; fall back to execCommand for older browsers.
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard
-        .writeText(text)
-        .then(() => showToast("AI summary prompt copied. Paste it into your AI assistant.", "success"))
-        .catch(() => fallbackCopy(ta));
-      return;
-    }
-
-    fallbackCopy(ta);
-
-    function fallbackCopy(textarea) {
-      textarea.focus();
-      textarea.select();
-      textarea.setSelectionRange(0, textarea.value.length);
-      try {
-        document.execCommand("copy");
-        showToast("AI summary prompt copied. Paste it into your AI assistant.", "success");
-      } catch (err) {
-        showToast("Copy failed. Select the text and copy it manually.", "warning", 4200);
-      }
-    }
-  }
-
-  function openAiAssistant(url, label) {
-    const promptEl = document.getElementById("aiBriefing");
-    const promptText = (promptEl && promptEl.value ? promptEl.value.trim() : "");
-
-    const openTarget = () => window.open(url, "_blank", "noopener");
-
-    if (!promptText) {
-      showToast("No summary prompt is available yet. Run an analysis first.", "warning");
-      openTarget();
-      return;
-    }
-
-    // Copy the prompt to clipboard when possible, then open the assistant in a new tab.
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard
-        .writeText(promptText)
-        .then(() => {
-          showToast(`Prompt copied. Paste it into ${label}.`, "success");
-          openTarget();
-        })
-        .catch(() => {
-          showToast("Copy did not work. Copy the prompt manually, then paste it into the assistant.", "warning", 4200);
-          openTarget();
-        });
-      return;
-    }
-
-    showToast("Clipboard is not available in this browser. Copy the prompt manually, then paste it into the assistant.", "warning", 5200);
-    openTarget();
-  }
-
-  function attachEventListeners() {
-    document.querySelectorAll(".tab-button").forEach((btn) => {
-      btn.addEventListener("click", onTabClick);
-    });
-
-    const applyBtn = document.getElementById("applyScenario");
-    if (applyBtn) applyBtn.addEventListener("click", onApplyScenario);
-
-    const fileInput = document.getElementById("fileInput");
-    if (fileInput) fileInput.addEventListener("change", onFileInputChange);
-
-    const btnValidateSelected = document.getElementById("btnValidateSelectedFile");
-    if (btnValidateSelected) btnValidateSelected.addEventListener("click", onValidateSelectedFileClick);
-
-    const btnUploadSelected = document.getElementById("btnUploadSelectedFile");
-    if (btnUploadSelected) btnUploadSelected.addEventListener("click", onUploadSelectedFileClick);
-
-    const btnResetTool = document.getElementById("btnResetTool");
-    if (btnResetTool) btnResetTool.addEventListener("click", onResetToolClick);
-
-    const btnLoadPasted = document.getElementById("btnLoadPasted");
-    if (btnLoadPasted)
-      btnLoadPasted.addEventListener("click", onLoadPastedClick);
-
-    const btnReloadDefault = document.getElementById("btnReloadDefault");
-    if (btnReloadDefault)
-      btnReloadDefault.addEventListener("click", onReloadDefaultClick);
-
-    const btnTplTsv = document.getElementById("btnDownloadTemplateTSV");
-    if (btnTplTsv) btnTplTsv.addEventListener("click", downloadTemplateTSV);
-
-    const btnTplXlsx = document.getElementById("btnDownloadTemplateXLSX");
-    if (btnTplXlsx) btnTplXlsx.addEventListener("click", downloadTemplateXLSX);
-
-    const filterSelect = document.getElementById("leaderboardFilter");
-    if (filterSelect)
-      filterSelect.addEventListener("change", onLeaderboardFilterChange);
-
-    const btnCleanData = document.getElementById("btnExportCleanData");
-    if (btnCleanData)
-      btnCleanData.addEventListener("click", exportCleanDatasetTSV);
-
-    const btnCleanDataXlsx = document.getElementById("btnExportCleanDataXLSX");
-    if (btnCleanDataXlsx)
-      btnCleanDataXlsx.addEventListener("click", exportCleanDatasetXLSX);
-
-    const btnSummary = document.getElementById("btnExportSummary");
-    if (btnSummary)
-      btnSummary.addEventListener("click", exportTreatmentSummaryCSV);
-
-    const btnResults = document.getElementById("btnExportResults");
-    if (btnResults)
-      btnResults.addEventListener("click", exportComparisonCSV);
-
-    const btnWorkbook = document.getElementById("btnExportWorkbook");
-    if (btnWorkbook)
-      btnWorkbook.addEventListener("click", exportWorkbook);
-
-    const btnWord = document.getElementById("btnExportWordReport");
-    if (btnWord) btnWord.addEventListener("click", exportWordReport);
-
-    const btnCopyAi = document.getElementById("btnCopyAiBriefing");
-    if (btnCopyAi)
-      btnCopyAi.addEventListener("click", onCopyAiBriefing);
-
-    
-
-    const btnOpenChatGPT = document.getElementById("btnOpenChatGPT");
-    if (btnOpenChatGPT)
-      btnOpenChatGPT.addEventListener("click", () =>
-        openAiAssistant("https://chat.openai.com/", "ChatGPT")
-      );
-
-    const btnOpenCopilot = document.getElementById("btnOpenCopilot");
-    if (btnOpenCopilot)
-      btnOpenCopilot.addEventListener("click", () =>
-        openAiAssistant("https://copilot.microsoft.com/", "Microsoft Copilot")
-      );
-
-// Live scenario updates
-    const priceInput = document.getElementById("pricePerTonne");
-    const yearsInput = document.getElementById("years");
-    const persInput = document.getElementById("persistenceYears");
-    const discInput = document.getElementById("discountRate");
-    const controlSelect = document.getElementById("controlChoice");
-
-    if (priceInput)
-      priceInput.addEventListener("change", onApplyScenario);
-    if (yearsInput)
-      yearsInput.addEventListener("change", onApplyScenario);
-    if (persInput)
-      persInput.addEventListener("change", onApplyScenario);
-    if (discInput)
-      discInput.addEventListener("change", onApplyScenario);
-    if (controlSelect)
-      controlSelect.addEventListener("change", onApplyScenario);
-  }
-
-  
-  function buildAssumptionsHtml(asHtml) {
-    const p = state.params || {};
-    const price = parseNumber(p.pricePerTonne);
-    const years = parseInt(p.years, 10);
-    const dr = parseNumber(p.discountRate);
-    const persistence = parseInt(p.persistenceYears, 10);
-
-    const parts = [];
-    parts.push(`Reference control: ${state.controlName || "Not set"}`);
-    parts.push(`Grain price: ${formatCurrency(price)} per tonne`);
-    parts.push(`Time horizon: ${Number.isFinite(years) ? years : ""} years`);
-    parts.push(`Discount rate: ${Number.isFinite(dr) ? (dr * 100).toFixed(1) : ""} percent`);
-    parts.push(`Benefit persistence: ${Number.isFinite(persistence) ? persistence : ""} years`);
-
-    if (state.assumptions && state.assumptions.capitalCostAssumedZero) {
-      parts.push("One-off establishment cost assumed to be zero because cost_amendment_input_per_ha was not provided");
-    }
-
-    const text = parts.join("; ") + ".";
-    if (!asHtml) return text;
-    return `<p class="small">${escapeHtml(text)}</p>`;
-  }
-
-  function renderAssumptionsUsed() {
-    const el = document.getElementById("assumptionsUsed");
-    if (!el) return;
-    el.innerHTML = buildAssumptionsHtml(true);
-  }
-
-  function renderIndicativeBadge() {
-    const badge = document.getElementById("indicativeBadge");
-    if (!badge) return;
-
-    const columnMap = state.columnMap || {};
-    const assumptions = state.assumptions || {};
-    const indicative = !!(assumptions.capitalCostAssumedZero || assumptions.missingYieldCells > 0 || assumptions.missingCostCells > 0 || !columnMap.replicate);
-
-    badge.style.display = indicative ? "inline-flex" : "none";
-  }
-
-  function renderReplicationTable() {
-    const table = document.getElementById("replicationTable");
-    if (!table) return;
-
-    if (!state.rows || !state.rows.length || !state.columnMap) {
-      table.innerHTML = "<tr><td>No data loaded.</td></tr>";
-      return;
-    }
-
-    const m = state.columnMap;
-    const headers = [
-      "treatment_name",
-      "is_control",
-      "plot_id",
-      "replicate_id",
-      "yield_t_ha",
-      "total_cost_per_ha",
-      "cost_amendment_input_per_ha"
-    ];
-
-    const getVal = (row, canon) => {
-      const map = {
-        treatment_name: m.treatmentName,
-        is_control: m.isControl,
-        plot_id: m.plotId,
-        replicate_id: m.replicate,
-        yield_t_ha: m.yield,
-        total_cost_per_ha: m.variableCost,
-        cost_amendment_input_per_ha: m.capitalCost
-      };
-      const h = map[canon];
-      return h ? row[h] : "";
-    };
-
-    const rowsHtml = state.rows.slice(0, 1000).map((r) => {
-      const t = String(getVal(r, "treatment_name") || "").trim();
-      const isC = parseBoolean(getVal(r, "is_control")) ? "TRUE" : "FALSE";
-      const plot = String(getVal(r, "plot_id") || "");
-      const rep = String(getVal(r, "replicate_id") || "");
-      const y = parseNumber(getVal(r, "yield_t_ha"));
-      const c = parseNumber(getVal(r, "total_cost_per_ha"));
-      const cc = parseNumber(getVal(r, "cost_amendment_input_per_ha"));
-
-      return `<tr>
-        <td>${escapeHtml(t)}</td>
-        <td>${escapeHtml(isC)}</td>
-        <td>${escapeHtml(plot)}</td>
-        <td>${escapeHtml(rep)}</td>
-        <td>${escapeHtml(Number.isNaN(y) ? "" : String(y))}</td>
-        <td>${escapeHtml(Number.isNaN(c) ? "" : String(c))}</td>
-        <td>${escapeHtml(Number.isNaN(cc) ? "" : String(cc))}</td>
-      </tr>`;
-    }).join("");
-
-    table.innerHTML = `
-      <thead>
-        <tr>
-          <th>Treatment</th>
-          <th>Control</th>
-          <th>Plot</th>
-          <th>Replicate</th>
-          <th>Yield (t/ha)</th>
-          <th>Total cost ($/ha)</th>
-          <th>One-off cost ($/ha)</th>
-        </tr>
-      </thead>
-      <tbody>${rowsHtml || ""}</tbody>
-    `;
-  }
-
-function renderAll() {
-    renderOverview();
-    renderDataSummaryAndChecks();
-    renderTemplateColumns();
-    renderControlChoice();
-    computeCBA();
-    renderLeaderboard();
-    renderComparisonTable();
-    renderCharts();
-    renderAssumptionsUsed();
-    renderIndicativeBadge();
-    renderReplicationTable();
-    buildAiBriefingPrompt();
-  }
-
-  document.addEventListener("DOMContentLoaded", () => {
-    attachEventListeners();
-    loadDefaultDataset();
   });
-})();
+
+  const metricSelect = document.getElementById("leaderboardMetric");
+  if (metricSelect) {
+    metricSelect.addEventListener("change", onLeaderboardMetricChange);
+  }
+
+  const applyBtn = document.getElementById("applyScenario");
+  if (applyBtn) applyBtn.addEventListener("click", onApplyScenario);
+
+  const runBtn = document.getElementById("btnRunAnalysis");
+  if (runBtn) runBtn.addEventListener("click", onRunAnalysisClick);
+
+  const fileInput = document.getElementById("fileInput");
+  if (fileInput) {
+    fileInput.addEventListener("change", (event) => {
+      const file = event.target.files[0];
+      onFileSelected(file);
+    });
+  }
+
+  const validateBtn = document.getElementById("btnValidateSelectedFile");
+  if (validateBtn) {
+    validateBtn.addEventListener("click", onValidateSelectedFileClick);
+  }
+
+  const uploadBtn = document.getElementById("btnUploadSelectedFile");
+  if (uploadBtn) {
+    uploadBtn.addEventListener("click", onUploadSelectedFileClick);
+  }
+
+  const resetBtn = document.getElementById("btnResetTool");
+  if (resetBtn) {
+    resetBtn.addEventListener("click", onResetToolClick);
+  }
+
+  const controlSelect = document.getElementById("controlTreatment");
+  if (controlSelect) {
+    controlSelect.addEventListener("change", onControlTreatmentChange);
+  }
+
+  const templateTsvBtn = document.getElementById("btnDownloadTemplateTSV");
+  if (templateTsvBtn) {
+    templateTsvBtn.addEventListener("click", downloadTemplateTSV);
+  }
+
+  const templateXlsxBtn = document.getElementById("btnDownloadTemplateXLSX");
+  if (templateXlsxBtn) {
+    templateXlsxBtn.addEventListener("click", downloadTemplateXLSX);
+  }
+
+  const exportReportBtn = document.getElementById("btnExportWordReport");
+  if (exportReportBtn) {
+    exportReportBtn.addEventListener("click", onExportWordReportClick);
+  }
+
+  const exportTechBtn = document.getElementById("btnExportWordTechnical");
+  if (exportTechBtn) {
+    exportTechBtn.addEventListener("click", onExportWordTechnicalClick);
+  }
+
+  const copyPromptBtn = document.getElementById("btnCopyAIPrompt");
+  if (copyPromptBtn) {
+    copyPromptBtn.addEventListener("click", copyAIPromptToClipboard);
+  }
+
+  const chatgptBtn = document.getElementById("btnOpenChatGPT");
+  if (chatgptBtn) {
+    chatgptBtn.addEventListener("click", () => openAiAssistant("chatgpt"));
+  }
+
+  const copilotBtn = document.getElementById("btnOpenCopilot");
+  if (copilotBtn) {
+    copilotBtn.addEventListener("click", () => openAiAssistant("copilot"));
+  }
+}
+
+document.addEventListener("DOMContentLoaded", () => {
+  initToast();
+  setupTabs();
+  attachEventListeners();
+  loadDefaultDataset().catch((err) => {
+    console.error(err);
+    showToast("Unable to load built-in example dataset.", "error");
+  });
+});
