@@ -1,0 +1,498 @@
+
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Cost benefit decision aid - Newcastle Business School</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <meta name="description" content="Cost benefit decision aid for replicated trials and demonstrations, comparing treatments to a measured control." />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+  <script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
+  <script defer src="app.js"></script>
+</head>
+<body>
+  <div id="toastContainer" aria-live="polite" aria-atomic="true"></div>
+
+  <header class="app-header">
+    <div class="branding">
+      <img src="logo.png" alt="Project logo" class="brand-logo">
+      <div class="logo-circle" aria-hidden="true">NBS</div>
+      <div class="title-group">
+        <h1>Cost benefit decision aid</h1>
+        <p>
+          Upload trial data and compare each treatment with a measured control using a clear
+          benefit cost analysis and charts, with results reported per hectare.
+        </p>
+      </div>
+    </div>
+</header>
+
+  <main class="app-main">
+    <nav class="tab-nav" aria-label="Main sections">
+      <button class="tab-button active" data-tab="overviewTab">Overview</button>
+      <button class="tab-button" data-tab="dataTab">Data and settings</button>
+      <button class="tab-button" data-tab="resultsTab">Results</button>
+      <button class="tab-button" data-tab="chartsTab">Charts</button>
+      <button class="tab-button" data-tab="exportsTab">Exports and AI brief</button>
+      <a class="tab-link" href="technical-appendix.html" target="_blank" rel="noopener">
+        Technical details (opens in new tab)
+      </a>
+    </nav>
+
+    <!-- OVERVIEW TAB -->
+    <section id="overviewTab" class="tab-panel active" aria-labelledby="Overview">
+      <section class="card onboarding" id="onboarding">
+        <h2>Getting started</h2>
+        <p class="small muted">
+          This decision-aid supports benefit cost analysis using your own trial or demonstration data. It produces transparent comparisons between a nominated control and one or more treatments, with tables and charts suitable for reporting.
+        </p>
+        <p class="small muted">
+          Recommended workflow: download the data template, enter one row per plot or replicate, upload the file, review any validation messages, view results and charts, then export outputs.
+        </p>
+        <p class="small muted">
+          Minimum data to run: at least one control row and at least one treatment row, with values provided for the core outcome and cost fields used in calculations. Optional columns may be left blank.
+        </p>
+        <p class="small muted">
+          Data quality matters. Well-structured data will produce clearer results, but the tool can still provide indicative comparisons when some optional fields are missing.
+        </p>
+      </section>
+
+      <p class="tab-intro">
+        This page gives a high-level snapshot of the currently loaded dataset. Results are calculated from all uploaded rows.
+      </p>
+
+      <div class="grid two-column">
+        <section class="card">
+          <h2>Trial snapshot</h2>
+          <div id="overviewSummary" class="overview-summary">
+            <!-- Filled by app.js -->
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>How to use this tool</h2>
+          <ol class="steps-list">
+            <li>
+              Download the <strong>data template</strong>, fill in your rows offline, then upload it in <strong>Data and settings</strong>.
+            </li>
+            <li>
+              Review <strong>validation</strong> feedback and confirm the control treatment.
+            </li>
+            <li>
+              View <strong>Results</strong> for the average treatment compared with the average control.
+            </li>
+            <li>
+              Use <strong>Charts</strong> to see patterns visually and <strong>Exports</strong> to download outputs.
+            </li>
+          </ol>
+          <p class="small muted" id="aggregationNote">
+            Note: if a treatment appears in multiple rows (replicates), the tool aggregates those rows and compares the average treatment with the average control.
+          </p>
+        </section>
+      </div>
+    </section>
+
+    <!-- DATA TAB -->
+    <section id="dataTab" class="tab-panel">
+      <p class="tab-intro">
+        This page controls the main economic assumptions and data source. You can upload a file or paste data.
+        All datasets go through the same checks and processing, and no rows are removed.
+      </p>
+
+      <div class="grid two-column">
+        <section class="card">
+          <h2>Scenario settings</h2>
+          <div class="field-group">
+            <label for="pricePerTonne">
+              Grain price per tonne
+              <span class="help" data-tooltip="Average price received per tonne of the harvested commodity. This multiplies the yield/outcome to calculate benefits.">?</span>
+            </label>
+            <div class="input-with-unit">
+              <input id="pricePerTonne" type="number" min="0" step="1" value="500" />
+              <span class="unit-label">$/t</span>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="years">
+              Years of benefits and costs
+              <span class="help" data-tooltip="Number of years over which the treatment is expected to affect yield and costs. This sets the time horizon for the cost-benefit analysis.">?</span>
+            </label>
+            <input id="years" type="number" min="1" max="40" step="1" value="10" />
+          </div>
+
+          <div class="field-group">
+            <label for="persistenceYears">
+              Years that yield gains last
+              <span class="help" data-tooltip="Number of years that yield gains from the soil treatment are expected to last. Costs are counted over the full horizon; yield gains can fade sooner.">?</span>
+            </label>
+            <input id="persistenceYears" type="number" min="1" max="40" step="1" value="10" />
+          </div>
+
+          <div class="field-group">
+            <label for="discountRate">
+              Discount rate per year
+              <span class="help" data-tooltip="Discount rate used to convert future costs and benefits into today’s dollars. Higher rates give less weight to future years.">?</span>
+            </label>
+            <div class="input-with-unit">
+              <input id="discountRate" type="number" min="0" max="30" step="0.5" value="5" />
+              <span class="unit-label">%</span>
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label for="controlChoice">
+              Control treatment
+              <span class="help" data-tooltip="Treatment used as the baseline for all comparisons. By default, this is detected from the trial dataset using the control flag.">?</span>
+            </label>
+            <select id="controlChoice"></select>
+            <div id="controlChoiceHelp" class="small muted"></div>
+          </div>
+
+          <button id="applyScenario" class="btn primary">Apply settings</button>
+        </section>
+
+        <section class="card">
+          <h2>Data source</h2>
+          <p class="small">
+            Upload a dataset with the same column structure as the template. All columns and rows are kept;
+            missing values are handled transparently and never filled silently.
+          </p>
+
+          <div class="field-group">
+            <label>
+              Download data template
+              <span class="help" data-tooltip="Download a blank file with the exact column names this tool expects. Fill it offline and upload it back here without changing columns.">?</span>
+            </label>
+            <div class="template-actions">
+              <button id="btnDownloadTemplateTSV" class="btn secondary">Download template (TSV)</button>
+              <button id="btnDownloadTemplateXLSX" class="btn ghost">Download template (Excel)</button>
+            </div>
+            <div id="templateColumns" class="template-columns" aria-label="Template columns">
+              <!-- Filled by app.js -->
+            </div>
+          </div>
+
+          <div class="field-group">
+            <label>
+              Upload trial file
+              <span class="help" data-tooltip="Upload a tab-separated or comma-separated file. Keep the header row and column names unchanged from the template. Optional columns can be left blank.">?</span>
+            </label>
+            <input id="fileInput" type="file" accept=".tsv,.csv,.txt" />
+          </div>
+
+          
+          <div class="upload-actions" role="group" aria-label="Upload actions">
+            <button id="btnValidateSelectedFile" class="btn secondary" type="button" data-tooltip="Checks the selected file for missing columns and minimum requirements, without loading it into the tool.">
+              Validate selected file
+            </button>
+            <button id="btnUploadSelectedFile" class="btn primary" type="button" data-tooltip="Loads the selected file into the tool and updates results and exports.">
+              Upload selected file
+            </button>
+            <button id="btnResetTool" class="btn ghost" type="button" data-tooltip="Clears the current dataset and returns the tool to the starting state.">
+              Reset to start
+            </button>
+          
+            <button id="btnRunAnalysis" class="btn secondary" type="button" disabled>Run analysis</button></div>
+
+          <div class="data-tips" id="dataTips" aria-label="Data tips">
+            <h3>Data tips</h3>
+            <p class="small">
+              Common issues that stop files loading are easy to fix. Check the following before uploading.
+            </p>
+            <ul class="tips-list">
+              <li>Keep the first row as the header row, and do not merge header cells.</li>
+              <li>Use the template column names exactly, including underscores.</li>
+              <li>Use one row per plot or replicate. You can include as many rows as you need.</li>
+              <li>Mark at least one row as the control using the is_control column.</li>
+              <li>Avoid commas in numbers unless they are thousands separators.</li>
+              <li>Use consistent treatment names across rows.</li>
+            </ul>
+          </div>
+
+          <div id="dataPreviewPanel" class="data-preview" aria-live="polite">
+            <!-- Filled by app.js -->
+          </div>
+<div id="uploadStatus" class="upload-status" role="status" aria-live="polite"></div>
+
+          <div class="field-group">
+            <label for="pasteInput">
+              Paste data (tab- or comma-separated)
+              <span class="help" data-tooltip="Paste the full header row and all data rows from a spreadsheet. The tool will detect whether it is tab- or comma-separated.">?</span>
+            </label>
+            <textarea id="pasteInput" rows="6" placeholder="Paste header and rows here"></textarea>
+            <button id="btnLoadPasted" class="btn secondary">Load pasted data</button>
+          </div>
+
+          <div class="field-group inline-actions">
+            <button id="btnReloadDefault" class="btn ghost">
+              Load example dataset
+            </button>
+          </div>
+
+          <div class="data-summary">
+            <h3>Dataset summary</h3>
+            <div id="dataSummary" class="small muted">
+              Waiting for dataset...
+            </div>
+          </div>
+
+          <div class="data-checks">
+            <h3>Data checks</h3>
+            <p class="small">
+              This section lists any issues found in the dataset, such as missing
+              columns or missing values. These checks never remove rows or columns.
+            </p>
+            <ul id="dataChecks" class="check-list"></ul>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- RESULTS TAB -->
+    <section id="resultsTab" class="tab-panel">
+      <p class="tab-intro">
+        This page shows the main results <span class="help" data-tooltip="Results are calculated from the uploaded dataset. Where treatments have multiple rows, values are averaged within each treatment before comparisons are made.">?</span>. Every number is calculated from the currently loaded dataset.
+        The control treatment appears as the baseline. All other treatments
+        are compared directly with this control in terms of discounted benefits,
+        discounted costs, and net profit per hectare over time.
+      </p>
+      <div class="results-meta">
+        <div id="indicativeBadge" class="badge" style="display:none;" role="status">
+          Indicative results
+        </div>
+      </div>
+
+      <section class="card assumptions-card">
+        <h2>Assumptions used</h2>
+        <div id="assumptionsUsed" class="small"></div>
+      </section>
+
+
+      <section class="card">
+        <div class="card-header-row">
+          <h2>Treatment leaderboard</h2>
+          <div class="field-group compact">
+            <label for="leaderboardFilter">
+              Filter
+              <span class="help" data-tooltip="Use these quick filters to focus on the most profitable or cost-effective treatments compared with the control.">?</span>
+            </label>
+            <select id="leaderboardFilter">
+              <option value="all">Show all treatments</option>
+              <option value="topNPV">Top 5 by net profit</option>
+              <option value="topBCR">Top 5 by benefit per dollar spent</option>
+              <option value="betterThanControl">Only improvements vs control</option>
+            </select>
+          </div>
+        </div>
+        <div id="leaderboardContainer" class="leaderboard">
+          <!-- Filled by app.js -->
+        </div>
+      </section>
+
+      <section class="card">
+        <div class="card-header-row">
+          <h2>Comparison to control</h2>
+          <p class="small muted">
+            Rows show what is being measured. Columns show the control and each
+            treatment. Within each treatment cell you see the level for that treatment
+            and the change compared with the control. All figures are per hectare and
+            discounted over the years you selected.
+          </p>
+        </div>
+
+        <div class="comparison-wrapper">
+          <table id="comparisonTable" class="comparison-table" aria-describedby="comparisonHelp">
+            <!-- Filled by app.js -->
+          </table>
+        </div>
+        <p id="comparisonHelp" class="small muted">
+          Values below are calculated from the uploaded dataset and displayed for the control and each treatment. Hover over each row label for definitions used in the tool.
+          <span id="basicAnalysisNote" class="note-inline" style="display:none;"></span>
+        </p>
+      
+      <section class="card">
+        <div class="card-header-row">
+          <h2>Replication view</h2>
+          <p class="small muted">
+            This view lists the individual plot or replicate rows used to form the averages. Use it to sanity check data entry and spot unusual values before exporting.
+          </p>
+        </div>
+
+        <details class="replication-details">
+          <summary>Show replicate rows by treatment</summary>
+          <div class="replication-table-wrap">
+            <table id="replicationTable" class="replication-table">
+              <!-- Filled by app.js -->
+            </table>
+          </div>
+        </details>
+      </section>
+</section>
+    </section>
+
+    <!-- CHARTS TAB -->
+    <section id="chartsTab" class="tab-panel">
+      <p class="tab-intro">
+        This page presents charts based on the currently loaded dataset. The charts highlight which
+        treatments perform better or worse than the control and whether gains come from
+        higher yields, lower costs, or both. All charts update when scenario settings
+        or data sources change.
+      </p>
+
+      <div class="grid two-column">
+        <section class="card">
+          <h2>Extra net profit compared with control</h2>
+          <p class="small muted">
+            This bar chart shows the difference in discounted net profit per hectare
+            between each treatment and the control. Bars above zero represent gains
+            relative to the control; bars below zero represent losses.
+          </p>
+          <div class="chart-container">
+            <canvas id="chartNetProfitVsControl" aria-label="Net profit difference compared with control"></canvas>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Total discounted costs and benefits</h2>
+          <p class="small muted">
+            This chart compares discounted total benefits and discounted total costs per
+            hectare for each treatment, including the control. It shows whether a
+            treatment wins mainly through higher benefits, lower costs, or a mix of both.
+          </p>
+          <div class="chart-container">
+            <canvas id="chartCostsBenefits" aria-label="Total discounted benefits and costs"></canvas>
+          </div>
+        </section>
+      </div>
+    </section>
+
+    <!-- EXPORTS TAB -->
+    <section id="exportsTab" class="tab-panel">
+      <p class="tab-intro">
+        This page lets you take results out of the tool. You can download the cleaned
+        dataset, treatment summaries, and results tables for use in spreadsheets or
+        reports. You can also copy a ready-made plain-language prompt to use with an
+        AI writing assistant.
+      </p>
+
+      <div class="grid two-column">
+        <section class="card">
+          <h2>Download data and results</h2>
+          <div class="field-group">
+            <button id="btnExportCleanData" class="btn secondary full-width">
+              Download cleaned dataset (TSV)
+            </button>
+            <p class="small muted">
+              Contains all columns and rows from the current dataset. No observations
+              are removed; missing values are kept explicit.
+            </p>
+          </div>
+
+          
+          <div class="field-group">
+            <button id="btnExportCleanDataXLSX" class="btn ghost full-width">
+              Download cleaned dataset (Excel)
+            </button>
+            <p class="small muted">
+              Downloads the cleaned dataset as an Excel file with the same column names used in the tool.
+            </p>
+          </div>
+<div class="field-group">
+            <button id="btnExportSummary" class="btn secondary full-width">
+              Download treatment summary (CSV)
+            </button>
+            <p class="small muted">
+              Contains one row per treatment with average yield, average costs, and all
+              discounted cost-benefit indicators.
+            </p>
+          </div>
+
+          <div class="field-group">
+            <button id="btnExportResults" class="btn secondary full-width">
+              Download comparison to control (CSV)
+            </button>
+            <p class="small muted">
+              Contains the same indicators as the comparison table, ready to paste into
+              a spreadsheet or document.
+            </p>
+          </div>
+
+          <div class="field-group">
+            <button id="btnExportWorkbook" class="btn ghost full-width">
+              Download Excel workbook
+            </button>
+            <p class="small muted">
+              Creates an Excel file with sheets for the cleaned dataset, treatment
+              summary, and comparison-to-control results.
+            </p>
+          </div>
+        </section>
+
+        <section class="card">
+          <h2>Word report</h2>
+          <p class="small muted">
+            Creates a report-ready Word document with an executive summary, assumptions used, and the main result tables.
+          </p>
+          <button id="btnExportWordReport" class="btn primary full-width">
+            Download Word report
+          </button>
+        </section>
+
+
+        <section class="card">
+          <h2>AI-ready summary prompt</h2>
+          <p class="small muted">
+            This prompt describes the scenario, the control, and how each treatment
+            compares in terms of benefits, costs, and net profit. You can copy and
+            paste it into an AI writing assistant to draft short reports for farmers,
+            advisers, or policy makers.
+          </p>
+
+          <div class="field-group">
+            <label for="aiBriefing">
+              Summary prompt text
+              <span class="help" data-tooltip="This text is generated from the current scenario and results. You can paste it into any AI assistant to request a report, leaving out or editing any parts you do not need.">?</span>
+            </label>
+            <textarea id="aiBriefing" rows="10" readonly></textarea>
+
+            <div class="ai-actions">
+              <button id="btnOpenChatGPT" class="btn secondary" type="button" title="Copies the prompt and opens ChatGPT in a new tab">
+                Open in ChatGPT
+              </button>
+              <button id="btnOpenCopilot" class="btn secondary" type="button" title="Copies the prompt and opens Microsoft Copilot in a new tab">
+                Open in Copilot
+              </button>
+            </div>
+            <p class="small muted ai-note">
+              When you click a button, the prompt is copied to your clipboard. Paste it into the chat window that opens.
+            </p>
+
+          </div>
+          <button id="btnCopyAiBriefing" class="btn primary">
+            Copy summary prompt
+          </button>
+        </section>
+      </div>
+    </section>
+  </main>
+
+  <footer class="app-footer" id="appFooter">
+    <div class="footer-inner">
+      <div class="footer-brand">
+        <div class="footer-title">Trial Cost benefit Decision Aid</div>
+        <div class="small muted">Project partner logos (placeholder)</div>
+      </div>
+      <div class="footer-logos" aria-label="Partner logos">
+        <div class="footer-logo" aria-hidden="true">LOGO</div>
+        <div class="footer-logo" aria-hidden="true">LOGO</div>
+        <div class="footer-logo" aria-hidden="true">LOGO</div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
