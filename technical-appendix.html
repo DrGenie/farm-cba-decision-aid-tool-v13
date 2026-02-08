@@ -1,806 +1,406 @@
-
 <!doctype html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Technical appendix and user guide</title>
+  <title>Technical appendix – Trial Cost-Benefit Decision Aid</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta name="description" content="User guide for uploading data, running the analysis, and interpreting results." />
+  <meta name="description" content="User guide for the Trial Cost-Benefit Decision Aid." />
   <link rel="stylesheet" href="styles.css" />
-  <link rel="preconnect" href="https://fonts.googleapis.com" />
-  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Open+Sans:wght@400;600;700&display=swap" rel="stylesheet" />
-
-  <style>
-    :root {
-      --ta-bg: var(--bg-alt);
-      --ta-surface: var(--bg-card);
-      --ta-border: var(--border-subtle);
-      --ta-text: var(--text-main);
-      --ta-muted: var(--text-muted);
-      --ta-accent: var(--bg-accent);
-      --ta-accent-soft: var(--bg-accent-soft);
-      --ta-good: var(--success);
-      --ta-warn: var(--warning);
-    }
-body.ta-appendix {
-      background: radial-gradient(circle at top left, #f3f9ff 0, #f6f9fb 40%, #eef3f8 100%);
-      color: var(--ta-text);
-      font-family: var(--ta-body);
-      line-height: 1.6;
-    }
-
-    .ta-shell {
-      max-width: 1120px;
-      margin: 0 auto;
-      padding: 2.5rem 1.25rem 3rem;
-    }
-
-    .ta-header {
-      background: linear-gradient(135deg, #153b72, #145a32);
-      border-radius: 1.25rem;
-      padding: 2.25rem 2.25rem 2rem;
-      color: #ffffff;
-      box-shadow: 0 18px 45px rgba(10, 31, 68, 0.35);
-      position: relative;
-      overflow: hidden;
-    }
-
-    .ta-header::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        radial-gradient(circle at 10% 20%, rgba(255, 255, 255, 0.15), transparent 55%),
-        radial-gradient(circle at 80% 0, rgba(255, 255, 255, 0.12), transparent 50%);
-      opacity: 0.9;
-      pointer-events: none;
-    }
-
-    .ta-header-inner {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      grid-template-columns: minmax(0, 2fr) minmax(0, 1.2fr);
-      gap: 2rem;
-      align-items: center;
-    }
-
-    .ta-badge {
-      display: inline-flex;
-      align-items: center;
-      gap: 0.5rem;
-      padding: 0.25rem 0.75rem;
-      border-radius: 999px;
-      background: rgba(7, 177, 93, 0.1);
-      border: 1px solid rgba(163, 230, 189, 0.8);
-      font-size: 0.78rem;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      color: #e9f8ef;
-    }
-
-    .ta-badge-dot {
-      width: 7px;
-      height: 7px;
-      border-radius: 999px;
-      background: #a5f3c7;
-      box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.2);
-    }
-
-    .ta-title {
-      font-size: 1.85rem;
-      font-weight: 650;
-      letter-spacing: 0.03em;
-      text-transform: uppercase;
-      margin: 0.75rem 0 0.5rem;
-    }
-
-    .ta-subtitle {
-      margin: 0;
-      font-size: 0.98rem;
-      max-width: 32rem;
-      color: rgba(243, 244, 246, 0.9);
-    }
-
-    .ta-header-stats {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 0.75rem;
-      font-size: 0.8rem;
-    }
-
-    .ta-stat-card {
-      background: rgba(15, 23, 42, 0.68);
-      border-radius: 0.9rem;
-      padding: 0.75rem 0.9rem;
-      border: 1px solid rgba(148, 163, 184, 0.55);
-      backdrop-filter: blur(8px);
-    }
-
-    .ta-stat-label {
-      font-size: 0.75rem;
-      text-transform: uppercase;
-      letter-spacing: 0.08em;
-      color: rgba(226, 232, 240, 0.9);
-      margin-bottom: 0.2rem;
-    }
-
-    .ta-stat-value {
-      font-size: 0.95rem;
-      font-weight: 600;
-      color: #e5f0ff;
-    }
-
-    .ta-chip-row {
-      margin-top: 0.9rem;
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.5rem;
-    }
-
-    .ta-chip {
-      padding: 0.35rem 0.7rem;
-      border-radius: 999px;
-      font-size: 0.72rem;
-      background: rgba(15, 23, 42, 0.55);
-      border: 1px solid rgba(148, 163, 184, 0.5);
-      color: rgba(226, 232, 240, 0.95);
-    }
-
-    .ta-chip.good {
-      background: rgba(22, 163, 74, 0.18);
-      border-color: rgba(187, 247, 208, 0.9);
-      color: #eafff2;
-    }
-
-    .ta-main {
-      margin-top: 2rem;
-      display: grid;
-      grid-template-columns: minmax(0, 2.1fr) minmax(0, 1.25fr);
-      gap: 1.75rem;
-      align-items: flex-start;
-    }
-
-    @media (max-width: 960px) {
-      .ta-header-inner {
-        grid-template-columns: minmax(0, 1fr);
-      }
-      .ta-main {
-        grid-template-columns: minmax(0, 1fr);
-      }
-    }
-
-    .ta-nav {
-      background: var(--ta-surface);
-      border-radius: 1rem;
-      padding: 1.1rem 1.2rem;
-      border: 1px solid rgba(148, 163, 184, 0.55);
-      box-shadow: 0 14px 30px rgba(15, 23, 42, 0.07);
-      position: sticky;
-      top: 1.5rem;
-    }
-
-    .ta-nav-title {
-      font-size: 0.85rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.09em;
-      color: var(--ta-muted);
-      margin-bottom: 0.5rem;
-    }
-
-    .ta-nav-section-title {
-      font-size: 0.78rem;
-      font-weight: 600;
-      text-transform: uppercase;
-      letter-spacing: 0.1em;
-      color: var(--ta-muted);
-      margin-top: 0.6rem;
-      margin-bottom: 0.2rem;
-    }
-
-    .ta-nav-link {
-      display: block;
-      font-size: 0.82rem;
-      padding: 0.3rem 0.2rem;
-      text-decoration: none;
-      color: var(--ta-text);
-      border-radius: 0.35rem;
-      transition: background 0.12s ease, color 0.12s ease, transform 0.08s ease;
-    }
-
-    .ta-nav-link span {
-      opacity: 0.85;
-    }
-
-    .ta-nav-link:hover {
-      background: var(--ta-accent-soft);
-      color: var(--ta-accent);
-      transform: translateX(2px);
-    }
-
-    .ta-section {
-      background: rgba(255, 255, 255, 0.98);
-      border-radius: 1.1rem;
-      padding: 1.4rem 1.6rem 1.6rem;
-      border: 1px solid rgba(148, 163, 184, 0.55);
-      box-shadow: 0 18px 40px rgba(15, 23, 42, 0.06);
-      margin-bottom: 1.4rem;
-    }
-
-    .ta-section:last-of-type {
-      margin-bottom: 0;
-    }
-
-    .ta-section-header {
-      margin-bottom: 0.75rem;
-    }
-
-    .ta-section-kicker {
-      text-transform: uppercase;
-      letter-spacing: 0.11em;
-      font-size: 0.78rem;
-      color: var(--ta-muted);
-      font-weight: 600;
-      margin-bottom: 0.1rem;
-    }
-
-    .ta-section-title {
-      font-size: 1.15rem;
-      font-weight: 640;
-      margin: 0;
-      color: var(--ta-text);
-    }
-
-    .ta-section-subtitle {
-      margin-top: 0.35rem;
-      font-size: 0.9rem;
-      color: var(--ta-muted);
-    }
-
-    .ta-body p {
-      margin: 0.55rem 0;
-      font-size: 0.92rem;
-      color: var(--ta-text);
-    }
-
-    .ta-body p.lead {
-      font-size: 0.98rem;
-      color: var(--ta-muted);
-      margin-top: 0.2rem;
-      margin-bottom: 0.7rem;
-    }
-
-    .ta-pill-banner {
-      border-radius: 1rem;
-      padding: 0.7rem 0.9rem;
-      font-size: 0.9rem;
-      background: linear-gradient(90deg, rgba(34, 197, 94, 0.1), rgba(59, 130, 246, 0.07));
-      border: 1px solid rgba(74, 222, 128, 0.7);
-      color: #0f5132;
-      margin: 0.5rem 0 0.8rem;
-    }
-
-    .ta-pill-banner strong {
-      font-weight: 650;
-    }
-
-    .ta-note {
-      border-radius: 0.9rem;
-      padding: 0.75rem 0.9rem;
-      font-size: 0.86rem;
-      margin: 0.7rem 0;
-    }
-
-    .ta-note.good {
-      background: var(--ta-good-soft);
-      border: 1px solid rgba(34, 197, 94, 0.6);
-      color: #064e1b;
-    }
-
-    .ta-note.risk {
-      background: var(--ta-risk-soft);
-      border: 1px solid rgba(239, 68, 68, 0.7);
-      color: #7f1d1d;
-    }
-
-    .ta-note.neutral {
-      background: var(--ta-neutral-soft);
-      border: 1px solid rgba(245, 158, 11, 0.6);
-      color: #78350f;
-    }
-
-    .ta-badge-inline {
-      display: inline-flex;
-      align-items: center;
-      justify-content: center;
-      padding: 0.08rem 0.55rem;
-      border-radius: 999px;
-      font-size: 0.72rem;
-      font-weight: 600;
-      letter-spacing: 0.06em;
-      text-transform: uppercase;
-      border: 1px solid rgba(148, 163, 184, 0.7);
-      background: #f8fafc;
-      color: #0f172a;
-      margin-left: 0.25rem;
-      vertical-align: baseline;
-    }
-
-    .ta-badge-inline.good {
-      background: #e4f6ea;
-      border-color: rgba(22, 163, 74, 0.6);
-      color: #065f46;
-    }
-
-    .ta-badge-inline.risk {
-      background: #fde4e4;
-      border-color: rgba(220, 38, 38, 0.7);
-      color: #7f1d1d;
-    }
-
-    .ta-badge-inline.neutral {
-      background: #fff5e2;
-      border-color: rgba(245, 158, 11, 0.8);
-      color: #92400e;
-    }
-
-    .ta-grid-two {
-      display: grid;
-      grid-template-columns: minmax(0, 1.1fr) minmax(0, 1.1fr);
-      gap: 1rem 1.25rem;
-    }
-
-    @media (max-width: 800px) {
-      .ta-grid-two {
-        grid-template-columns: minmax(0, 1fr);
-      }
-    }
-
-    .ta-callout {
-      border-radius: 0.9rem;
-      padding: 0.9rem 1rem;
-      background: linear-gradient(135deg, #f8fafc, #eef2ff);
-      border: 1px solid rgba(129, 140, 248, 0.6);
-      margin: 0.75rem 0;
-      font-size: 0.9rem;
-    }
-
-    .ta-callout strong {
-      font-weight: 650;
-      color: #111827;
-    }
-
-    .ta-table-wrapper {
-      margin: 0.75rem 0;
-      border-radius: 0.9rem;
-      border: 1px solid rgba(148, 163, 184, 0.7);
-      overflow: hidden;
-      background: #ffffff;
-    }
-
-    .ta-table-scroll {
-      width: 100%;
-      overflow-x: auto;
-    }
-
-    table.ta-table {
-      width: 100%;
-      border-collapse: collapse;
-      font-size: 0.88rem;
-      min-width: 640px;
-    }
-
-    table.ta-table th,
-    table.ta-table td {
-      padding: 0.45rem 0.6rem;
-      border-bottom: 1px solid rgba(226, 232, 240, 0.9);
-      text-align: left;
-      vertical-align: top;
-    }
-
-    table.ta-table th {
-      background: #f1f5f9;
-      font-weight: 600;
-      font-size: 0.82rem;
-      text-transform: uppercase;
-      letter-spacing: 0.06em;
-      color: #475569;
-    }
-
-    table.ta-table tr:nth-child(even) td {
-      background: #f9fafb;
-    }
-
-    table.ta-table td.label {
-      font-weight: 500;
-      white-space: nowrap;
-      color: #111827;
-    }
-
-    .ta-figure {
-      border-radius: 0.9rem;
-      padding: 0.85rem 1rem;
-      background: linear-gradient(135deg, #f8fafc, #e0f2fe);
-      border: 1px solid rgba(148, 163, 184, 0.7);
-      margin: 0.85rem 0;
-      font-size: 0.9rem;
-    }
-
-    .ta-figure-title {
-      font-weight: 630;
-      margin-bottom: 0.25rem;
-      color: #0f172a;
-    }
-
-    .ta-figure-axes {
-      font-family: var(--ta-mono);
-      font-size: 0.8rem;
-      color: #1e293b;
-      margin-top: 0.1rem;
-    }
-
-    .ta-math {
-      font-family: var(--ta-mono);
-      font-size: 0.86rem;
-      background: var(--ta-code-bg);
-      padding: 0.22rem 0.4rem;
-      border-radius: 0.35rem;
-      border: 1px solid rgba(148, 163, 184, 0.6);
-      white-space: nowrap;
-    }
-
-    .ta-equation-block {
-      font-family: var(--ta-mono);
-      font-size: 0.86rem;
-      background: var(--ta-code-bg);
-      padding: 0.4rem 0.6rem;
-      border-radius: 0.45rem;
-      border: 1px solid rgba(148, 163, 184, 0.7);
-      margin: 0.4rem 0 0.6rem;
-      overflow-x: auto;
-    }
-
-    .ta-example-box {
-      border-radius: 0.95rem;
-      padding: 0.9rem 1rem;
-      background: #fefce8;
-      border: 1px solid rgba(245, 158, 11, 0.7);
-      margin: 0.75rem 0;
-      font-size: 0.9rem;
-    }
-
-    .ta-example-title {
-      font-weight: 640;
-      color: #92400e;
-      margin-bottom: 0.3rem;
-    }
-
-    .ta-example-step {
-      margin: 0.2rem 0;
-    }
-
-    .ta-example-note {
-      margin-top: 0.45rem;
-      font-size: 0.86rem;
-      color: #78350f;
-    }
-
-    .ta-tag-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 0.35rem;
-      margin-top: 0.35rem;
-    }
-
-    .ta-tag {
-      font-size: 0.72rem;
-      padding: 0.12rem 0.55rem;
-      border-radius: 999px;
-      border: 1px solid rgba(148, 163, 184, 0.7);
-      background: #f9fafb;
-      color: #475569;
-    }
-
-    .ta-tag.good {
-      border-color: rgba(22, 163, 74, 0.7);
-      background: #e4f6ea;
-      color: #14532d;
-    }
-
-    .ta-tag.risk {
-      border-color: rgba(220, 38, 38, 0.8);
-      background: #fde4e4;
-      color: #7f1d1d;
-    }
-
-    .ta-footer {
-      margin-top: 2rem;
-      padding-top: 1.2rem;
-      border-top: 1px solid rgba(148, 163, 184, 0.6);
-      font-size: 0.8rem;
-      color: var(--ta-muted);
-    }
-
-    .ta-footer a {
-      color: var(--ta-accent);
-      text-decoration: none;
-    }
-
-    .ta-footer a:hover {
-      text-decoration: underline;
-    }
-  </style>
 </head>
-<body class="ta-appendix">
+<body>
   <div class="ta-shell">
     <header class="ta-header">
-      <div class="ta-header-inner">
-        <div>
-          <div class="ta-badge">
-            <span class="ta-badge-dot"></span>
-            <span>Cost benefit decision aid</span>
+      <div class="ta-breadcrumb">Trial Cost-Benefit Decision Aid / Technical appendix</div>
+      <div class="ta-title-row">
+        <div class="ta-title-block">
+          <div class="ta-title">Technical appendix</div>
+          <div class="ta-subtitle">
+            How the tool reads your data, runs the analysis, and supports exports and AI-generated summaries.
           </div>
-          <h1 class="ta-title">Technical Appendix and User Guide</h1>
-          <p class="ta-subtitle">
-            This guide explains how to prepare and upload data, how each screen works, and how to interpret outputs for extension and reporting.
-          </p>
-          <div class="ta-chip-row">
-            <span class="ta-chip good">Clear upload checks and feedback</span>
+          <div class="ta-header-tagline">
+            <span class="ta-chip ta-highlight">Clear upload checks and feedback</span>
             <span class="ta-chip">Replicates averaged automatically</span>
             <span class="ta-chip">Exports match your loaded data</span>
           </div>
         </div>
-        <div class="ta-header-stats">
-          <div class="ta-stat-card">
-            <div class="ta-stat-label">Audience</div>
-            <div class="ta-stat-value">Farmers, advisers, policy teams, analysts</div>
-          </div>
-          <div class="ta-stat-card">
-            <div class="ta-stat-label">Core comparison</div>
-            <div class="ta-stat-value">All treatments relative to the measured control</div>
-          </div>
-          <div class="ta-stat-card">
-            <div class="ta-stat-label">Decision focus</div>
-            <div class="ta-stat-value">Net profit, costs, risk and robustness</div>
-          </div>
-          <div class="ta-stat-card">
-            <div class="ta-stat-label">Data source</div>
-            <div class="ta-stat-value">Full faba beans trial dataset, all 48 plots, no rows removed</div>
-          </div>
+        <div class="ta-status-block">
+          <div class="ta-status-label">Version</div>
+          <div class="ta-status-value">Current working build</div>
         </div>
       </div>
     </header>
 
-    
-<main class="ta-main">
-  <aside class="ta-nav" aria-label="On this page">
-    <div class="ta-nav-title">On this page</div>
-    <a class="ta-nav-link" href="#quick-start">Quick start</a>
-    <a class="ta-nav-link" href="#minimum-data">Minimum data required</a>
-    <a class="ta-nav-link" href="#template-guide">Template guide</a>
-    <a class="ta-nav-link" href="#worked-example">Worked example</a>
-    <a class="ta-nav-link" href="#tabs">How each tab works</a>
-    <a class="ta-nav-link" href="#results">Understanding results</a>
-    <a class="ta-nav-link" href="#troubleshooting">Troubleshooting</a>
-    <a class="ta-nav-link" href="#methods">Notes on calculations</a>
-  </aside>
+    <main class="ta-main">
+      <section class="ta-summary-grid">
+        <div class="ta-summary-card">
+          <div class="ta-summary-title">Purpose</div>
+          <div class="ta-summary-body">
+            This appendix explains, in plain language, how the decision aid:
+            reads your dataset, checks that it is usable, aggregates replicated plots,
+            and calculates the cost-benefit indicators shown in the Results and Charts tabs.
+          </div>
+        </div>
+        <div class="ta-summary-card">
+          <div class="ta-summary-title">At a glance</div>
+          <div class="ta-stat-grid">
+            <div class="ta-stat-card">
+              <div class="ta-stat-label">Core comparison</div>
+              <div class="ta-stat-value">All treatments relative to the measured control</div>
+            </div>
+            <div class="ta-stat-card">
+              <div class="ta-stat-label">Replicates</div>
+              <div class="ta-stat-value">Multiple rows per treatment averaged</div>
+            </div>
+            <div class="ta-stat-card">
+              <div class="ta-stat-label">Data source</div>
+              <div class="ta-stat-value">Example replicated trial dataset, using all available plots</div>
+            </div>
+          </div>
+        </div>
+      </section>
 
-  <section class="ta-content">
-    <section id="quick-start" class="ta-section">
-      <h2>Quick start</h2>
-      <p>
-        This tool compares trial or demonstration treatments against a measured control using a cost benefit analysis.
-        It turns yield and cost information into an economic comparison per hectare, shows charts, and produces exports
-        you can use in extension notes and reporting.
-      </p>
-      <ol class="ta-steps">
-        <li><strong>Download the template</strong> from the Data tab.</li>
-        <li><strong>Enter your data</strong> in Excel and save as TSV or CSV. Keep the column names unchanged.</li>
-        <li><strong>Upload the file</strong> (or paste the data).</li>
-        <li><strong>Check the upload message</strong>. If anything is missing, the tool tells you what to fix.</li>
-        <li><strong>Select the control</strong> if prompted, then review the Results tab.</li>
-        <li><strong>Export</strong> tables and charts, or use the AI ready summary prompt to draft a short write up.</li>
-      </ol>
-      <p class="ta-note">
-        Better structured data gives better analysis. If some optional fields are missing, the tool can still produce an indicative comparison using the core fields.
-      </p>
-    </section>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>Quick start</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            The tool is designed to support early conversations about trial results, not to
+            replace a full economic evaluation. It aims to keep users engaged even when data are imperfect.
+          </p>
+          <ol>
+            <li>
+              <strong>Download the template.</strong>
+              The Data &amp; settings tab provides a blank template (TSV or Excel) with all required
+              column headers, including a flag for control rows.
+            </li>
+            <li>
+              <strong>Enter one row per plot or replicate.</strong>
+              Each row should record the treatment name, whether it is a control, and the core
+              cost and outcome fields (for example yield and total cost per hectare).
+            </li>
+            <li>
+              <strong>Upload and check.</strong>
+              Use “Check file” to see whether required columns, control rows, and treatment rows
+              have been recognised. The tool explains what is missing if something is wrong.
+            </li>
+            <li>
+              <strong>Run the analysis.</strong>
+              Once the file passes the structural checks, click “Upload and use in analysis”
+              and then use the “Run analysis” button in the Results tab if you want to re-run
+              the calculations after changing assumptions.
+            </li>
+            <li>
+              <strong>Export or use AI.</strong>
+              The Exports &amp; AI brief tab can generate a Word document and an AI-ready prompt
+              that can be pasted into Copilot or ChatGPT for a short narrative summary.
+            </li>
+          </ol>
+          <p class="ta-note">
+            Better structured data gives better analysis. However, the tool can still provide
+            basic, clearly labelled indicative results when some optional fields are missing
+            or when only a subset of plots has complete data.
+          </p>
+        </div>
+      </section>
 
-    <section id="minimum-data" class="ta-section">
-      <h2>Minimum data required</h2>
-      <p>The tool will run as long as your file contains the following:</p>
-      <ul class="ta-list">
-        <li>At least one row marked as the control.</li>
-        <li>At least one row for a treatment (not control).</li>
-        <li>These core columns with numeric values where relevant: <code>treatment_name</code>, <code>is_control</code>, <code>yield_t_ha</code>, <code>total_cost_per_ha</code>.</li>
-      </ul>
-      <p>
-        You can include as many replicate rows as you like. The tool averages replicates within each treatment and compares
-        treatment averages to the control average.
-      </p>
-    </section>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>Minimum data required</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            The decision aid enforces only a small set of minimum requirements. This is intentional:
+            it reduces the risk that users stop using the tool because their dataset is not perfect.
+          </p>
+          <ul>
+            <li>
+              <strong>At least one control row.</strong>
+              The <code>is_control</code> column must flag at least one row as control
+              (values such as 1, true, yes, or control are accepted).
+            </li>
+            <li>
+              <strong>At least one treatment row.</strong>
+              There must be at least one non-control row to compare against the control.
+            </li>
+            <li>
+              <strong>Core cost and outcome fields present.</strong>
+              The template includes columns for yield per hectare and total cost per hectare.
+              At least some rows must contain usable numbers in these fields.
+            </li>
+          </ul>
+          <p>
+            Optional columns (for example variable cost, fixed cost, capital cost, or other benefit)
+            may be left blank. The tool does not require users to delete extra columns, and it does not
+            block uploads because of missing optional values.
+          </p>
+          <p class="ta-note">
+            If some optional fields are missing or partly populated, the tool falls back to a
+            “basic analysis”. It reports treatment means and simple differences relative to the
+            control and labels these outputs as indicative. This helps keep users engaged rather
+            than leaving them with an empty results screen.
+          </p>
+        </div>
+      </section>
 
-    <section id="template-guide" class="ta-section">
-      <h2>Template guide</h2>
-      <p>
-        The template contains the full set of columns supported by the tool. You do not need to delete unused columns.
-        Leave optional columns blank if they are not available in your dataset.
-      </p>
-      <h3>Key columns</h3>
-      <div class="ta-table-wrap">
-        <table class="ta-table">
-          <thead>
-            <tr>
-              <th>Column</th>
-              <th>What to enter</th>
-              <th>Example</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td><code>treatment_name</code></td>
-              <td>The label you want to appear in charts and tables. Use the same name across replicates.</td>
-              <td>Control, Deep OM + PAM, Practice change A</td>
-            </tr>
-            <tr>
-              <td><code>is_control</code></td>
-              <td>Marks the control rows. Use TRUE or FALSE (or 1 or 0).</td>
-              <td>TRUE</td>
-            </tr>
-            <tr>
-              <td><code>yield_t_ha</code></td>
-              <td>Yield in tonnes per hectare for that plot or replicate.</td>
-              <td>2.85</td>
-            </tr>
-            <tr>
-              <td><code>total_cost_per_ha</code></td>
-              <td>Total cost in dollars per hectare for that plot or replicate. Include all relevant inputs and operations you want counted.</td>
-              <td>615.00</td>
-            </tr>
-            <tr>
-              <td><code>replicate_id</code></td>
-              <td>Optional. A label for replicate rows, if you have it.</td>
-              <td>R1, Plot 3</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
-      <p class="ta-note">
-        If you only have totals, enter them in <code>total_cost_per_ha</code> and leave the detailed cost columns blank.
-      </p>
-    </section>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>How data are read and validated</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            Data can be uploaded as TSV, CSV, or Excel files. The tool reads the first row as the
+            header and expects one row per plot or replicate. The validation step performs three
+            main checks before the analysis runs.
+          </p>
+          <ol>
+            <li>
+              <strong>Header names.</strong>
+              Column headers are normalised (lowercase, spaces to underscores) and compared
+              with the required names in the template. If required columns are missing,
+              the tool reports “Missing required column(s)” and lists them explicitly.
+            </li>
+            <li>
+              <strong>Control and treatments.</strong>
+              The <code>is_control</code> column is used to identify control rows. If no control
+              row is found, the tool reports “No control identified”. If all rows are flagged as control,
+              it reports “No treatment rows detected”.
+            </li>
+            <li>
+              <strong>Numeric fields.</strong>
+              Yield and total cost columns are checked for usable numeric values. If all entries
+              in a core field are non-numeric or empty, the tool reports that these fields do not
+              contain usable values and asks the user to review formatting.
+            </li>
+          </ol>
+          <p>
+            The “Check file” button runs these validations and shows a list of errors and warnings
+            without altering the current dataset. Only when the user clicks “Upload and use in analysis”
+            and the file passes the core checks does the tool replace the current data.
+          </p>
+          <p class="ta-note">
+            When a file does not meet the minimum requirements, the tool explains what is wrong
+            in plain language (for example: missing required columns, no control identified,
+            or no treatment rows). This is designed to prevent the common reaction
+            “My data will not load, and I do not know how to fix it”.
+          </p>
+        </div>
+      </section>
 
-    <section id="worked-example" class="ta-section">
-      <h2>Worked example</h2>
-      <p>
-        Below is a minimal file that will run. It includes one control and one treatment with two replicates.
-        The tool will average the two treatment replicates and compare them to the control average.
-      </p>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>How replicates are aggregated</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            Most field trials and demonstrations have multiple plots or replicates for each treatment.
+            The decision aid keeps the data structure simple:
+          </p>
+          <ul>
+            <li>Each row in the dataset represents one plot or replicate.</li>
+            <li>All rows with the same treatment name are grouped together.</li>
+            <li>For each treatment, the tool calculates average yield, average total cost,
+                and any other available average values per hectare.</li>
+          </ul>
+          <p>
+            At the analysis stage, every table and chart is based on these aggregated treatment
+            averages. The control treatment is also summarised in the same way, using all rows
+            flagged as control. This is why the Results tab explicitly notes that treatments are
+            compared using averages over replicates.
+          </p>
+          <p class="ta-note">
+            If some plots have missing values in optional columns, those values are simply
+            excluded from the average for that column. The presence of missing data in optional
+            fields does not stop the analysis from running.
+          </p>
+        </div>
+      </section>
 
-      <div class="ta-table-wrap">
-        <table class="ta-table">
-          <thead>
-            <tr>
-              <th>treatment_name</th>
-              <th>is_control</th>
-              <th>yield_t_ha</th>
-              <th>total_cost_per_ha</th>
-            </tr>
-          </thead>
-          <tbody>
-            <tr>
-              <td>Control</td>
-              <td>TRUE</td>
-              <td>2.60</td>
-              <td>560</td>
-            </tr>
-            <tr>
-              <td>Treatment A</td>
-              <td>FALSE</td>
-              <td>2.90</td>
-              <td>610</td>
-            </tr>
-            <tr>
-              <td>Treatment A</td>
-              <td>FALSE</td>
-              <td>3.10</td>
-              <td>590</td>
-            </tr>
-          </tbody>
-        </table>
-      </div>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>How indicators are calculated</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            The tool calculates a small set of standard economic indicators for each treatment:
+            net present value (NPV), benefit-cost ratio (BCR), payback period, and net annual
+            return per hectare. All calculations are done per hectare using the averages described
+            above and the scenario assumptions set by the user.
+          </p>
+          <ul>
+            <li>
+              <strong>Net annual return per hectare.</strong>
+              The tool multiplies average yield per hectare by the user-entered grain price
+              to obtain revenue per hectare, then subtracts total cost per hectare to obtain net
+              annual return per hectare.
+            </li>
+            <li>
+              <strong>Net present value (NPV).</strong>
+              If enough information is available, the tool applies the chosen time horizon and
+              discount rate to convert the stream of net annual returns (and any additional benefits
+              or capital costs) into a net present value per hectare.
+            </li>
+            <li>
+              <strong>Benefit-cost ratio (BCR).</strong>
+              The benefit-cost ratio is calculated as the present value of benefits divided by
+              the present value of costs. Where only partial information is available, this is
+              left blank rather than forcing a misleading number.
+            </li>
+            <li>
+              <strong>Payback period.</strong>
+              When a capital cost per hectare is provided, the tool calculates an approximate
+              payback period by dividing capital outlay by net annual return per hectare.
+              If net returns are non-positive, payback is not reported.
+            </li>
+          </ul>
+          <p>
+            All treatments are then compared with the selected control treatment. The comparison
+            table in the Results tab reports, for each indicator, the level for the control,
+            the level for each treatment, and the difference (treatment minus control).
+          </p>
+          <p class="ta-note">
+            When information required for full discounted cost-benefit analysis is missing,
+            the tool does not fabricate detail. Instead, it focuses on reporting simple treatment
+            means and differences, and labels the output as indicative.
+          </p>
+        </div>
+      </section>
 
-      <p>
-        In this example, the treatment average yield is 3.00 t per hectare and the treatment average cost is 600 dollars per hectare.
-        The tool then calculates the difference from control and converts the yield difference into revenue using the grain price you enter in the Scenario tab.
-      </p>
-    </section>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>Handling incomplete or messy data</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            Trial datasets are often imperfect. Plots may be missing, some variables may be
+            recorded only in a subset of sites, and column names may differ between projects.
+            The decision aid is built to respond to this reality rather than requiring
+            a perfectly cleaned file.
+          </p>
+          <ul>
+            <li>
+              <strong>Missing optional values.</strong>
+              Optional columns can be entirely empty or partially filled. Calculations based
+              on those fields use only rows with usable numbers and leave indicators blank
+              where a meaningful figure cannot be derived.
+            </li>
+            <li>
+              <strong>Extra columns.</strong>
+              Additional columns beyond those in the template are ignored by the analysis.
+              Users do not need to delete them.
+            </li>
+            <li>
+              <strong>Basic analysis fallback.</strong>
+              If full discounted analysis is not possible (for example, because capital costs
+              or additional benefits are not provided), the Results tab displays a basic analysis:
+              treatment means, simple differences relative to the control, and a clear note that
+              results are indicative.
+            </li>
+          </ul>
+          <p class="ta-note">
+            This design aims to keep users engaged even when they have limited time or experience
+            with data cleaning. It also helps farming systems groups use the tool across a variety
+            of trial datasets without needing to standardise every detail in advance.
+          </p>
+        </div>
+      </section>
 
-    <section id="tabs" class="ta-section">
-      <h2>How each tab works</h2>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>Exports and AI-assisted summaries</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            The Exports &amp; AI brief tab has been designed to make it easy to move from
+            on-screen results to documents and short written summaries.
+          </p>
+          <ul>
+            <li>
+              <strong>Word report exports.</strong>
+              The “Results summary” export creates a Word document containing the main
+              comparison table, replicate summary, and a short technical description of the
+              scenario assumptions. The “Technical appendix” export provides a concise
+              description of how the indicators were calculated.
+            </li>
+            <li>
+              <strong>AI-ready prompt.</strong>
+              The AI prompt box contains a structured description of the scenario and results
+              (including a simple table in tab-separated format). The “Copy prompt” button copies
+              this text to the clipboard.
+            </li>
+            <li>
+              <strong>Opening Copilot or ChatGPT.</strong>
+              The “Open in Copilot” and “Open in ChatGPT” buttons open a new browser window on
+              the relevant site and copy the AI prompt so users can paste it into the chat box.
+              The prompt is written to encourage short, plain-language summaries that are suitable
+              for growers, advisors, or project reports.
+            </li>
+          </ul>
+          <p class="ta-note">
+            The AI integration is deliberately simple: the tool prepares a clear, data-linked
+            prompt and leaves the wording of the final narrative to the AI system. This helps
+            ensure that summaries are grounded in the numbers produced by the decision aid
+            while still being quick to adapt for different audiences.
+          </p>
+        </div>
+      </section>
 
-      <h3>Overview</h3>
-      <p>
-        A short introduction to what the tool does and what you need before you start.
-      </p>
+      <section class="ta-section">
+        <div class="ta-section-header">
+          <h2>Troubleshooting and good practice</h2>
+        </div>
+        <div class="ta-section-body">
+          <p>
+            A few patterns help users get the most value from the decision aid while keeping
+            effort manageable.
+          </p>
+          <ul>
+            <li>
+              <strong>Start from the template.</strong>
+              When in doubt, download a fresh template, paste or merge your existing data into
+              it, and then upload this file. This keeps header names and structure consistent.
+            </li>
+            <li>
+              <strong>Use descriptive treatment names.</strong>
+              Treatment names should be clear enough that users can recognise them easily
+              in the Results tab and exports.
+            </li>
+            <li>
+              <strong>Document assumptions.</strong>
+              When using outputs in reports or extension materials, record the key assumptions:
+              grain price, time horizon, discount rate, and what is included in costs.
+              The Word exports and AI prompt both include these details to help.
+            </li>
+            <li>
+              <strong>Review indicative results carefully.</strong>
+              When the tool labels results as indicative, take time to check which data are missing.
+              In some cases a small amount of additional data cleaning or re-entry can turn
+              an indicative comparison into a full cost-benefit analysis.
+            </li>
+          </ul>
+          <p class="ta-note">
+            The most common adoption risk identified during user testing is early disengagement
+            at the data-loading stage. Clear onboarding, realistic minimum requirements,
+            and direct feedback about what needs to be fixed are therefore central design features
+            of this tool.
+          </p>
+        </div>
+      </section>
 
-      <h3>Data</h3>
-      <p>
-        Download the template, then upload your file. After upload, the tool checks for the minimum required columns and rows.
-        If something is missing, you will see a clear message such as a missing required column, no control identified, or no treatment rows.
-      </p>
-
-      <h3>Scenario</h3>
-      <p>
-        Set the grain price, time horizon, and discount rate. These settings affect the reported present value measures.
-        If you are unsure, start with your best estimate and adjust later to see how conclusions change.
-      </p>
-
-      <h3>Results</h3>
-      <p>
-        Shows treatment averages, differences from control, and summary rankings. Charts and tables update immediately after upload.
-        Replicates are aggregated automatically and results are shown per hectare.
-      </p>
-
-      <h3>Exports</h3>
-      <p>
-        Download results tables and a workbook version of the analysis. The exports reflect the currently loaded dataset and scenario settings.
-      </p>
-
-      <h3>Technical appendix</h3>
-      <p>
-        This page. It explains the data requirements, workflow, and how to interpret outputs without needing economic training.
-      </p>
-    </section>
-
-    <section id="results" class="ta-section">
-      <h2>Understanding results</h2>
-      <p>
-        The main comparison is always treatment average minus control average. A positive net benefit means the treatment performs better than the control under the price and cost settings you have entered.
-      </p>
-      <ul class="ta-list">
-        <li><strong>Yield change</strong> is the treatment yield average minus the control yield average.</li>
-        <li><strong>Cost change</strong> is the treatment total cost average minus the control total cost average.</li>
-        <li><strong>Net benefit</strong> is the value of the yield change minus the cost change, reported over the chosen time horizon.</li>
-      </ul>
-      <p class="ta-note">
-        If your dataset is incomplete, the tool may still provide an indicative comparison using the available core fields. Treat these outputs as a starting point and improve the dataset where feasible.
-      </p>
-    </section>
-
-    <section id="troubleshooting" class="ta-section">
-      <h2>Troubleshooting</h2>
-      <h3>My file will not load</h3>
-      <ul class="ta-list">
-        <li>Check that the first row is the header and matches the template column names.</li>
-        <li>Check that the file is saved as TSV or CSV, not an Excel binary format.</li>
-        <li>Confirm that <code>is_control</code> is filled for at least one row and that at least one non control row exists.</li>
-        <li>Confirm that <code>yield_t_ha</code> and <code>total_cost_per_ha</code> contain numbers for those rows.</li>
-      </ul>
-
-      <h3>I have missing values</h3>
-      <p>
-        Missing values are allowed in optional columns. If the core columns are present, the tool will run.
-        If a core value is missing for a row, that row may be ignored in the average for that treatment.
-      </p>
-    </section>
-
-    <section id="methods" class="ta-section">
-      <h2>Notes on calculations</h2>
-      <p>
-        The tool uses the uploaded yield and cost data per hectare, then applies the grain price you enter to convert yield differences into revenue differences.
-        Present value metrics use the time horizon and discount rate you provide. Replicates are averaged within each treatment before comparisons are made.
-      </p>
-    </section>
-
-    <div class="ta-footer-note">
-      If you need to share your results, use the Exports tab so your tables and charts match the data and scenario settings used in the tool.
-    </div>
-  </section>
-</main>
-
+      <section class="ta-section">
+        <div class="ta-section-body">
+          <p>
+            This technical appendix can be attached directly to Word exports from the tool or
+            used as background material for training sessions with farming systems groups,
+            advisors, and project teams.
+          </p>
+          <div class="ta-footer-note">
+            If you need to share your results, use the Exports tab so that the tables and
+            charts match the data and scenario settings used in the tool.
+          </div>
+        </div>
+      </section>
+    </main>
   </div>
 </body>
 </html>
